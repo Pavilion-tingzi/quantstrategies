@@ -3,6 +3,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 from pathlib import Path
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Tuple, Union, Any
+import matplotlib.dates as mdates
+from matplotlib.gridspec import GridSpec
+import warnings
+from tabulate import tabulate
 
 
 class DoubleMovingAverageStrategy:
@@ -1413,4 +1420,1806 @@ class DoubleMovingAverageStrategy:
         plt.show()
 
         return fig
+
+class RSIStrategy:
+    """
+    RSI策略主类
+    包含数据加载、策略计算、回测、绩效分析、报告生成等功能
+    """
+
+    class SignalType(Enum):
+            """信号类型枚举"""
+            BUY = "买入"
+            SELL = "卖出"
+            NONE = ""
+
+    @dataclass
+    class TradeRecord:
+            """交易记录数据类"""
+            日期: str
+            类型: str
+            价格: float
+            数量: int
+            金额: float
+            佣金: float
+            印花税: float
+            总费用: float
+            现金_后: float
+            持仓_后: int
+
+    @dataclass
+    class PendingSignal:
+            """待处理信号数据类"""
+            type: 'RSIStrategy.SignalType'
+            original_date: str
+
+    @dataclass
+    class BacktestResult:
+            """回测结果数据类"""
+            code: str  # 股票代码
+            params: Dict  # 策略参数
+            initial_capital: float
+            final_value: float
+            total_return: float
+            annual_return: float
+            max_drawdown: float
+            sharpe_ratio: float
+            win_rate: float
+            profit_loss_ratio: float
+            total_trades: int
+            total_fees: float
+            monthly_win: int
+            monthly_loss: int
+            monthly_avg_return: float
+            start_date: str
+            end_date: str
+            trading_days: int
+            daily_df: pd.DataFrame = None
+            trade_records: List['RSIStrategy.TradeRecord'] = field(default_factory=list)
+
+    def __init__(self,
+                 name: str = "RSI策略",
+                 initial_capital: float = 1000000,
+                 commission_rate: float = 0.0001,
+                 min_commission: float = 5,
+                 stamp_tax_rate: float = 0.001,
+                 buy_threshold: int = 30,
+                 sell_threshold: int = 70,
+                 rsi_period: int = 14,
+                 min_interval_days: int = 5,
+                 output_dir: str = "./output"):
+        """
+        初始化RSI策略
+
+        Args:
+            name: 策略名称
+            initial_capital: 初始资金
+            commission_rate: 佣金费率
+            min_commission: 最低佣金
+            stamp_tax_rate: 印花税率
+            buy_threshold: 买入阈值
+            sell_threshold: 卖出阈值
+            rsi_period: RSI计算周期
+            min_interval_days: 最小交易间隔（天）
+            output_dir: 输出目录
+        """
+        self.name = name
+        self.initial_capital = initial_capital
+        self.commission_rate = commission_rate
+        self.min_commission = min_commission
+        self.stamp_tax_rate = stamp_tax_rate
+        self.buy_threshold = buy_threshold
+        self.sell_threshold = sell_threshold
+        self.rsi_period = rsi_period
+        self.min_interval_days = min_interval_days
+        self.output_dir = Path(output_dir)
+
+        # 创建输出目录
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 数据相关
+        self.df = None
+        self.stock_code = None
+        self.stock_name = None
+
+        # 回测相关
+        self.backtest_results = []
+        self.current_result = None
+
+    def load_data(self, file_path: str, stock_code: str = None, stock_name: str = None) -> pd.DataFrame:
+            """
+            加载数据
+
+            Args:
+                file_path: 数据文件路径
+                stock_code: 股票代码
+                stock_name: 股票名称
+
+            Returns:
+                加载的数据框
+            """
+            self.df = pd.read_csv(file_path)
+            self.stock_code = stock_code or Path(file_path).stem.split('_')[2] if '_' in Path(file_path).stem else '未知'
+            self.stock_name = stock_name or self.stock_code
+
+            # 确保日期格式正确
+            if '日期' in self.df.columns:
+                self.df['日期'] = pd.to_datetime(self.df['日期'])
+
+            return self.df
+
+    def load_data_from_df(self, df: pd.DataFrame, stock_code: str = "自定义",
+                              stock_name: str = "自定义") -> pd.DataFrame:
+            """
+            从DataFrame加载数据
+
+            Args:
+                df: 数据框，必须包含'日期'和'收盘'列
+                stock_code: 股票代码
+                stock_name: 股票名称
+
+            Returns:
+                数据框
+            """
+            required_cols = ['日期', '收盘']
+            for col in required_cols:
+                if col not in df.columns:
+                    raise ValueError(f"数据框必须包含'{col}'列")
+
+            self.df = df.copy()
+            self.stock_code = stock_code
+            self.stock_name = stock_name
+
+            # 确保日期格式正确
+            if '日期' in self.df.columns and not pd.api.types.is_datetime64_any_dtype(self.df['日期']):
+                self.df['日期'] = pd.to_datetime(self.df['日期'])
+
+            return self.df
+
+    def preprocess_data(self) -> pd.DataFrame:
+            """
+            数据预处理：标记异常、停牌等
+
+            Returns:
+                预处理后的数据框
+            """
+            if self.df is None:
+                raise ValueError("请先加载数据")
+
+            # 检查是否有异常情况列，如果没有则创建
+            if '异常情况' not in self.df.columns:
+                self.df['异常情况'] = '正常'
+
+            # 标记停牌和价格异常
+            self.df['是停牌'] = self.df['异常情况'] == '停牌'
+            self.df['是价格异常'] = self.df['异常情况'] == '价格异常'
+
+            return self.df
+
+    def calculate_rsi(self, period: int = None) -> pd.DataFrame:
+            """
+            计算RSI指标
+
+            Args:
+                period: RSI计算周期，默认使用初始化时的值
+
+            Returns:
+                包含RSI的数据框
+            """
+            if self.df is None:
+                raise ValueError("请先加载数据")
+
+            period = period or self.rsi_period
+
+            # 创建仅包含正常交易日的序列
+            normal_days = self.df[~self.df['是停牌']].copy()
+            normal_days = normal_days.reset_index(drop=True)
+
+            if len(normal_days) == 0:
+                raise ValueError("没有正常交易日数据")
+
+            # 计算价格变化
+            normal_days['价格变化'] = normal_days['收盘'].diff()
+            normal_days['涨幅'] = normal_days['价格变化'].apply(lambda x: x if x > 0 else 0)
+            normal_days['跌幅'] = normal_days['价格变化'].apply(lambda x: abs(x) if x < 0 else 0)
+
+            # 计算平均涨幅和跌幅
+            normal_days['平均涨幅'] = normal_days['涨幅'].rolling(window=period).mean().shift(1)
+            normal_days['平均跌幅'] = normal_days['跌幅'].rolling(window=period).mean().shift(1)
+
+            # 计算RSI
+            normal_days['RSI'] = 100 * normal_days['平均涨幅'] / (
+                    normal_days['平均涨幅'] + normal_days['平均跌幅'])
+
+            # 将RSI值映射回原DataFrame
+            self.df['RSI'] = np.nan
+            for _, row in normal_days.iterrows():
+                self.df.loc[self.df['日期'] == row['日期'], 'RSI'] = row['RSI']
+
+            # 向前填充RSI值
+            self.df['RSI'] = self.df['RSI'].ffill()
+
+            return self.df
+
+    def generate_signals(self) -> pd.DataFrame:
+            """
+            根据RSI生成交易信号
+
+            Returns:
+                包含交易信号的数据框
+            """
+            if self.df is None or 'RSI' not in self.df.columns:
+                raise ValueError("请先计算RSI指标")
+
+            # 判断RSI的位置状态
+            self.df['RSI_上穿'] = (self.df['RSI'] >= self.buy_threshold) & (
+                        self.df['RSI'].shift(1) < self.buy_threshold)
+            self.df['RSI_下穿'] = (self.df['RSI'] <= self.sell_threshold) & (
+                        self.df['RSI'].shift(1) > self.sell_threshold)
+
+            # 初始化信号列
+            self.df['交易信号'] = ''
+
+            # 状态变量
+            last_signal_date = None
+            last_signal_type = None
+            pending_signal = None
+
+            for i in range(len(self.df)):
+                current_date = self.df.iloc[i]['日期']
+
+                # 如果是停牌日，直接跳过
+                if self.df.iloc[i]['是停牌']:
+                    continue
+
+                # 处理待处理信号
+                if pending_signal is not None:
+                    if not self.df.iloc[i]['是价格异常']:  # 正常交易日
+                        signal_type = pending_signal['type']
+
+                        if signal_type == RSIStrategy.SignalType.BUY:
+                            if last_signal_type is None or last_signal_type == RSIStrategy.SignalType.SELL.value:
+                                if self._check_interval(current_date, last_signal_date):
+                                    self.df.loc[self.df.index[i], '交易信号'] = RSIStrategy.SignalType.BUY.value
+                                    last_signal_date = current_date
+                                    last_signal_type = RSIStrategy.SignalType.BUY.value
+
+                        elif signal_type == RSIStrategy.SignalType.SELL:
+                            if last_signal_type == RSIStrategy.SignalType.BUY.value:
+                                if self._check_interval(current_date, last_signal_date):
+                                    self.df.loc[self.df.index[i], '交易信号'] = RSIStrategy.SignalType.SELL.value
+                                    last_signal_date = current_date
+                                    last_signal_type = RSIStrategy.SignalType.SELL.value
+
+                        pending_signal = None
+                    # 价格异常日继续等待
+                else:
+                    # 检查新信号
+                    if self.df.iloc[i]['是价格异常']:
+                        continue
+
+                    # 买入信号
+                    if self.df.iloc[i]['RSI_上穿']:
+                        if last_signal_type is None or last_signal_type == RSIStrategy.SignalType.SELL.value:
+                            if self._check_interval(current_date, last_signal_date):
+                                self.df.loc[self.df.index[i], '交易信号'] = RSIStrategy.SignalType.BUY.value
+                                last_signal_date = current_date
+                                last_signal_type = RSIStrategy.SignalType.BUY.value
+
+                    # 卖出信号
+                    elif self.df.iloc[i]['RSI_下穿']:
+                        if last_signal_type == RSIStrategy.SignalType.BUY.value:
+                            if self._check_interval(current_date, last_signal_date):
+                                self.df.loc[self.df.index[i], '交易信号'] = RSIStrategy.SignalType.SELL.value
+                                last_signal_date = current_date
+                                last_signal_type = RSIStrategy.SignalType.SELL.value
+
+                # 预判下一个交易日是否有异常
+                if i < len(self.df) - 1:
+                    next_day = self.df.iloc[i + 1]
+                    current_signal = self.df.iloc[i]['交易信号']
+
+                    if current_signal and next_day['是价格异常']:
+                        signal_type = RSIStrategy.SignalType.BUY if current_signal == RSIStrategy.SignalType.BUY.value else RSIStrategy.SignalType.SELL
+                        self.df.loc[self.df.index[i], '交易信号'] = ''
+                        pending_signal = {'type': signal_type, 'original_date': current_date}
+
+                    elif current_signal and next_day['是停牌']:
+                        self.df.loc[self.df.index[i], '交易信号'] = ''
+
+            # 确保第一笔是买入
+            self._ensure_first_signal_is_buy()
+
+            return self.df
+
+    def _check_interval(self, current_date, last_date):
+        """检查交易间隔"""
+        if last_date is None:
+            return True
+        days_diff = (current_date - pd.to_datetime(last_date)).days
+        return days_diff >= self.min_interval_days
+
+    def _ensure_first_signal_is_buy(self):
+        """确保第一笔信号是买入"""
+        first_signal_idx = self.df[self.df['交易信号'] != ''].index
+        if len(first_signal_idx) > 0 and self.df.iloc[first_signal_idx[0]]['交易信号'] == RSIStrategy.SignalType.SELL.value:
+            self.df.loc[first_signal_idx[0], '交易信号'] = ''
+
+    def run_backtest(self) -> BacktestResult:
+        """
+        执行回测
+
+        Returns:
+            回测结果对象
+        """
+        if self.df is None or '交易信号' not in self.df.columns:
+            raise ValueError("请先生成交易信号")
+
+        # 回测变量初始化
+        capital = self.initial_capital
+        cash = capital
+        position = 0
+        trade_records = []
+
+        daily_value = []
+        daily_cash = []
+        daily_position = []
+        daily_price = []
+        dates = []
+
+        for i in range(len(self.df)):
+            date = self.df.iloc[i]['日期']
+            price = self.df.iloc[i]['收盘']
+            signal = self.df.iloc[i]['交易信号']
+            is_stop = self.df.iloc[i]['是停牌'] if '是停牌' in self.df.columns else False
+
+            # 执行交易
+            if not is_stop and signal:
+                if signal == RSIStrategy.SignalType.BUY.value:
+                    # 买入
+                    max_shares = int(cash / price)
+                    if max_shares > 0:
+                        for shares in range(max_shares, 0, -1):
+                            trade_value = shares * price
+                            commission = max(trade_value * self.commission_rate, self.min_commission)
+                            total_cost = trade_value + commission
+
+                            if total_cost <= cash:
+                                cash -= total_cost
+                                position += shares
+                                trade_records.append(RSIStrategy.TradeRecord(
+                                    日期=date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date),
+                                    类型='买入',
+                                    价格=price,
+                                    数量=shares,
+                                    金额=trade_value,
+                                    佣金=commission,
+                                    印花税=0,
+                                    总费用=commission,
+                                    现金_后=cash,
+                                    持仓_后=position
+                                ))
+                                break
+
+                elif signal == RSIStrategy.SignalType.SELL.value and position > 0:
+                    # 卖出
+                    trade_value = position * price
+                    commission = max(trade_value * self.commission_rate, self.min_commission)
+                    stamp_tax = trade_value * self.stamp_tax_rate
+                    total_received = trade_value - commission - stamp_tax
+
+                    trade_records.append(RSIStrategy.TradeRecord(
+                        日期=date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date),
+                        类型='卖出',
+                        价格=price,
+                        数量=position,
+                        金额=trade_value,
+                        佣金=commission,
+                        印花税=stamp_tax,
+                        总费用=commission + stamp_tax,
+                        现金_后=cash + total_received,
+                        持仓_后=0
+                    ))
+
+                    cash += total_received
+                    position = 0
+
+            # 计算当日资产
+            if not is_stop:
+                current_value = position * price + cash
+            else:
+                current_value = daily_value[-1] if daily_value else capital
+
+            dates.append(date)
+            daily_value.append(current_value)
+            daily_cash.append(cash)
+            daily_position.append(position)
+            daily_price.append(price)
+
+        # 创建每日资产DataFrame
+        df_daily = pd.DataFrame({
+            '日期': dates,
+            '收盘价': daily_price,
+            '资产总值': daily_value,
+            '现金': daily_cash,
+            '持仓': daily_position,
+            '是停牌': self.df['是停牌'] if '是停牌' in self.df.columns else [False] * len(self.df)
+        })
+
+        # 计算绩效指标
+        result = self._calculate_performance_metrics(df_daily, trade_records)
+
+        # 存储结果
+        self.current_result = result
+        self.backtest_results.append(result)
+
+        return result
+
+    def _calculate_performance_metrics(self, df_daily: pd.DataFrame,
+                                       trade_records: List[TradeRecord]) -> BacktestResult:
+        """计算绩效指标"""
+        # 计算买入持有资产
+        first_price = df_daily.loc[0, '收盘价']
+        df_daily['买入持有资产'] = self.initial_capital * df_daily['收盘价'] / first_price
+        df_daily.loc[df_daily['是停牌'], '买入持有资产'] = df_daily['买入持有资产'].shift(1).fillna(
+            self.initial_capital)
+
+        # 计算日收益率
+        df_daily['策略日收益率'] = df_daily['资产总值'].pct_change()
+        df_daily['买入持有日收益率'] = df_daily['买入持有资产'].pct_change()
+
+        # 计算最大回撤
+        df_daily['策略累计最大值'] = df_daily['资产总值'].cummax()
+        df_daily['策略回撤'] = (df_daily['资产总值'] - df_daily['策略累计最大值']) / df_daily['策略累计最大值'] * 100
+
+        # 计算最终资产和总收益率
+        final_value = df_daily['资产总值'].iloc[-1]
+        total_return = (final_value / self.initial_capital - 1) * 100
+
+        # 计算年化收益率
+        trading_days = len(df_daily[~df_daily['是停牌']])
+        years = trading_days / 245
+        annual_return = (final_value / self.initial_capital) ** (1 / years) - 1 if years > 0 else 0
+
+        # 最大回撤
+        max_drawdown = df_daily['策略回撤'].min()
+
+        # 夏普比率
+        risk_free_rate = 0.03
+        strategy_daily_returns = df_daily['策略日收益率'].dropna()
+        if len(strategy_daily_returns) > 0 and strategy_daily_returns.std() != 0:
+            sharpe_ratio = np.sqrt(245) * (
+                        strategy_daily_returns.mean() - risk_free_rate / 245) / strategy_daily_returns.std()
+        else:
+            sharpe_ratio = 0
+
+        # 胜率和盈亏比
+        win_rate = 0
+        profit_loss_ratio = 0
+        total_fees = 0
+
+        if len(trade_records) > 0:
+            trade_df = pd.DataFrame([vars(t) for t in trade_records])
+            buy_trades = trade_df[trade_df['类型'] == '买入'].reset_index(drop=True)
+            sell_trades = trade_df[trade_df['类型'] == '卖出'].reset_index(drop=True)
+            total_fees = trade_df['佣金'].sum() + trade_df['印花税'].sum()
+
+            trade_pnl = []
+            win_count = 0
+            total_profit = 0
+            total_loss = 0
+
+            for i in range(min(len(buy_trades), len(sell_trades))):
+                buy = buy_trades.iloc[i]
+                sell = sell_trades.iloc[i]
+                pnl = sell['金额'] - sell['佣金'] - sell['印花税'] - buy['金额'] - buy['佣金']
+                trade_pnl.append(pnl)
+
+                if pnl > 0:
+                    win_count += 1
+                    total_profit += pnl
+                else:
+                    total_loss += abs(pnl)
+
+            if len(trade_pnl) > 0:
+                win_rate = win_count / len(trade_pnl) * 100
+            if total_loss > 0:
+                profit_loss_ratio = total_profit / total_loss
+
+        # 月度收益
+        df_daily['年月'] = df_daily['日期'].dt.to_period('M')
+        monthly = df_daily.groupby('年月')['资产总值'].agg(['first', 'last'])
+        monthly['月收益率'] = (monthly['last'] / monthly['first'] - 1) * 100
+        monthly_win = len(monthly[monthly['月收益率'] > 0])
+        monthly_loss = len(monthly[monthly['月收益率'] < 0])
+        monthly_avg = monthly['月收益率'].mean()
+
+        # 创建结果对象
+        result = RSIStrategy.BacktestResult(
+            code=self.stock_code,
+            params={
+                'buy_threshold': self.buy_threshold,
+                'sell_threshold': self.sell_threshold,
+                'rsi_period': self.rsi_period,
+                'min_interval_days': self.min_interval_days
+            },
+            initial_capital=self.initial_capital,
+            final_value=final_value,
+            total_return=total_return,
+            annual_return=annual_return * 100,
+            max_drawdown=max_drawdown,
+            sharpe_ratio=sharpe_ratio,
+            win_rate=win_rate,
+            profit_loss_ratio=profit_loss_ratio,
+            total_trades=len([t for t in trade_records if t.类型 == '买入']),
+            total_fees=total_fees,
+            monthly_win=monthly_win,
+            monthly_loss=monthly_loss,
+            monthly_avg_return=monthly_avg,
+            start_date=df_daily['日期'].min().strftime('%Y-%m-%d'),
+            end_date=df_daily['日期'].max().strftime('%Y-%m-%d'),
+            trading_days=trading_days,
+            daily_df=df_daily,
+            trade_records=trade_records
+        )
+
+        return result
+
+    def _calculate_hold_sharpe(self, daily_df: pd.DataFrame) -> float:
+        """
+        计算买入持有策略的夏普比率
+
+        Args:
+            daily_df: 包含每日资产数据的DataFrame
+
+        Returns:
+            买入持有策略的夏普比率
+        """
+        try:
+            if daily_df is None:
+                return 0.0
+
+            # 计算日收益率
+            if '买入持有日收益率' not in daily_df.columns:
+                if '买入持有资产' in daily_df.columns:
+                    daily_df['买入持有日收益率'] = daily_df['买入持有资产'].pct_change()
+                else:
+                    return 0.0
+
+            hold_returns = daily_df['买入持有日收益率'].dropna()
+            hold_returns = hold_returns[np.isfinite(hold_returns)]
+
+            risk_free_rate = 0.03  # 无风险利率 3%
+
+            if len(hold_returns) > 1 and hold_returns.std() > 1e-8:
+                # 年化夏普比率计算
+                excess_returns = hold_returns - risk_free_rate / 245
+                sharpe = np.sqrt(245) * excess_returns.mean() / hold_returns.std()
+                return sharpe
+            return 0.0
+        except Exception as e:
+            warnings.warn(f"计算买入持有夏普比率时出错: {e}")
+            return 0.0
+
+    def plot_results(self, save_path: str = None) -> plt.Figure:
+        """
+        绘制回测结果图表
+
+        Args:
+            save_path: 保存路径，默认使用输出目录
+
+        Returns:
+            matplotlib图像对象
+        """
+        if self.current_result is None:
+            raise ValueError("请先运行回测")
+
+        df = self.df
+        df_daily = self.current_result.daily_df
+        trade_records = self.current_result.trade_records
+
+        # 分离买入点和卖出点
+        buy_signals = df[df['交易信号'] == RSIStrategy.SignalType.BUY.value]
+        sell_signals = df[df['交易信号'] == RSIStrategy.SignalType.SELL.value]
+
+        # 创建图表
+        plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+        plt.style.use('seaborn-v0_8-darkgrid')
+
+        fig = plt.figure(figsize=(20, 30))
+        gs_main = GridSpec(6, 1, figure=fig, height_ratios=[1, 1, 1, 1, 1, 1.2], hspace=0.35)
+
+        # 子图1：价格 + 买卖点
+        ax1 = fig.add_subplot(gs_main[0])
+        normal_days = df[~df['是停牌']].copy()
+        ax1.plot(normal_days['日期'], normal_days['收盘'], label='Close Price', color='blue', linewidth=1.5)
+        ax1.scatter(buy_signals['日期'], buy_signals['收盘'], color='red', marker='^', s=100,
+                    label='Buy Signal', zorder=5, edgecolors='black', linewidth=1)
+        ax1.scatter(sell_signals['日期'], sell_signals['收盘'], color='green', marker='v', s=100,
+                    label='Sell Signal', zorder=5, edgecolors='black', linewidth=1)
+        ax1.set_title(f'{self.stock_name} - Price Chart with Buy/Sell Signals', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('Price', fontsize=12)
+        ax1.legend(loc='upper left')
+        ax1.grid(True, alpha=0.3)
+
+        # 子图2：RSI指标
+        ax2 = fig.add_subplot(gs_main[1])
+        ax2.plot(df['日期'], df['RSI'], label=f'RSI({self.rsi_period})', color='purple', linewidth=1.5)
+        ax2.axhspan(self.sell_threshold, 100, alpha=0.2, color='red', label='Overbought')
+        ax2.axhspan(0, self.buy_threshold, alpha=0.2, color='green', label='Oversold')
+        ax2.axhline(y=self.sell_threshold, color='red', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax2.axhline(y=50, color='gray', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax2.axhline(y=self.buy_threshold, color='green', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax2.scatter(buy_signals['日期'], buy_signals['RSI'], color='red', marker='^', s=100,
+                    label='Buy Signal', zorder=5, edgecolors='black', linewidth=1)
+        ax2.scatter(sell_signals['日期'], sell_signals['RSI'], color='green', marker='v', s=100,
+                    label='Sell Signal', zorder=5, edgecolors='black', linewidth=1)
+        ax2.set_title('RSI Indicator with Buy/Sell Signals', fontsize=14, fontweight='bold')
+        ax2.set_ylabel('RSI Value', fontsize=12)
+        ax2.set_ylim(0, 100)
+        ax2.legend(loc='upper left')
+        ax2.grid(True, alpha=0.3)
+
+        # 子图3：持仓状态
+        ax3 = fig.add_subplot(gs_main[2])
+        ax3.fill_between(df_daily['日期'], 0, df_daily['持仓'],
+                         where=df_daily['持仓'] > 0, color='blue', alpha=0.6, label='In Position')
+        ax3.fill_between(df_daily['日期'], 0, df_daily['持仓'],
+                         where=df_daily['持仓'] == 0, color='gray', alpha=0.3, label='Out of Position')
+        ax3.scatter(buy_signals['日期'], [df_daily['持仓'].max() * 0.8] * len(buy_signals),
+                    color='red', marker='^', s=80, label='Buy Signal', zorder=5)
+        ax3.scatter(sell_signals['日期'], [0] * len(sell_signals), color='green', marker='v', s=80,
+                    label='Sell Signal', zorder=5)
+        ax3.set_title('Position Status', fontsize=14, fontweight='bold')
+        ax3.set_ylabel('Shares Held', fontsize=12)
+        ax3.legend(loc='upper left')
+        ax3.grid(True, alpha=0.3)
+
+        # 子图4：策略净值对比
+        ax4 = fig.add_subplot(gs_main[3])
+        ax4.semilogy(df_daily['日期'], df_daily['资产总值'], label='Strategy NAV', color='red', linewidth=2)
+        ax4.semilogy(df_daily['日期'], df_daily['买入持有资产'], label='Buy & Hold NAV', color='blue', linewidth=2,
+                     alpha=0.7)
+        ax4.axhline(y=self.initial_capital, color='gray', linestyle='--', linewidth=1, alpha=0.5,
+                    label='Initial Capital')
+        ax4.set_title('Strategy NAV vs Buy & Hold NAV (Log Scale)', fontsize=14, fontweight='bold')
+        ax4.set_ylabel('NAV (Log Scale)', fontsize=12)
+        ax4.legend(loc='upper left')
+        ax4.grid(True, alpha=0.3, which='both')
+
+        # 子图5：策略回撤 vs 买入持有回撤对比（简化版）
+        ax5 = fig.add_subplot(gs_main[4])
+
+        # 确保有买入持有回撤数据
+        if '持有回撤' not in df_daily.columns:
+            df_daily['持有累计最大值'] = df_daily['买入持有资产'].cummax()
+            df_daily['持有回撤'] = 0.0
+            mask = df_daily['持有累计最大值'] > 0
+            df_daily.loc[mask, '持有回撤'] = (df_daily.loc[mask, '买入持有资产'] - df_daily.loc[
+                mask, '持有累计最大值']) / df_daily.loc[mask, '持有累计最大值'] * 100
+            df_daily['持有回撤'] = df_daily['持有回撤'].clip(upper=0)
+
+        # 绘制两条回撤曲线
+        ax5.plot(df_daily['日期'], df_daily['策略回撤'], color='red', linewidth=1.5, label='Strategy Drawdown')
+        ax5.plot(df_daily['日期'], df_daily['持有回撤'], color='blue', linewidth=1.5, linestyle='--',
+                 label='Buy & Hold Drawdown')
+
+        # 填充区域（可选）
+        ax5.fill_between(df_daily['日期'], 0, df_daily['策略回撤'],
+                         where=df_daily['策略回撤'] < 0, color='red', alpha=0.2)
+        ax5.fill_between(df_daily['日期'], 0, df_daily['持有回撤'],
+                         where=df_daily['持有回撤'] < 0, color='blue', alpha=0.1)
+
+        ax5.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+        ax5.set_title(
+            f'Drawdown Comparison - Strategy vs Buy & Hold\n'
+            f'Strategy: {self.current_result.max_drawdown:.2f}% | '
+            f'Buy & Hold: {df_daily["持有回撤"].min():.2f}%',
+            fontsize=14, fontweight='bold'
+        )
+        ax5.set_ylabel('Drawdown (%)', fontsize=12)
+        ax5.set_ylim(min(df_daily['策略回撤'].min(), df_daily['持有回撤'].min()) * 1.1, 5)
+        ax5.legend(loc='lower left')
+        ax5.grid(True, alpha=0.3)
+
+        # 子图6：收益率分布
+        ax6 = fig.add_subplot(gs_main[5])
+        daily_returns_pct = df_daily['策略日收益率'].dropna() * 100
+
+        bin_width = 0.1
+        min_return = np.floor(daily_returns_pct.min() / bin_width) * bin_width
+        max_return = np.ceil(daily_returns_pct.max() / bin_width) * bin_width
+        bins = np.arange(min_return, max_return + bin_width, bin_width)
+
+        n, bins, patches = ax6.hist(daily_returns_pct, bins=bins, edgecolor='black', alpha=0.7)
+
+        # 颜色设置
+        for i, patch in enumerate(patches):
+            x_center = (bins[i] + bins[i + 1]) / 2
+            if x_center < -2:
+                patch.set_facecolor('darkgreen')
+            elif x_center < 0:
+                patch.set_facecolor('lightgreen')
+            elif x_center < 2:
+                patch.set_facecolor('lightcoral')
+            else:
+                patch.set_facecolor('darkred')
+
+        mean_return = daily_returns_pct.mean()
+        ax6.axvline(x=mean_return, color='blue', linestyle='--', linewidth=2, label=f'Mean: {mean_return:.3f}%')
+        ax6.axvline(x=0, color='black', linestyle='-', linewidth=1)
+
+        ax6.set_title('Daily Return Distribution', fontsize=12, fontweight='bold')
+        ax6.set_xlabel('Daily Return (%)', fontsize=10)
+        ax6.set_ylabel('Frequency (Days)', fontsize=10)
+        ax6.legend(loc='upper right', fontsize=8)
+        ax6.grid(True, alpha=0.3, axis='y')
+
+        # 设置日期格式
+        for ax in [ax1, ax2, ax3, ax4, ax5]:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+            ax.tick_params(axis='x', rotation=45)
+
+        plt.subplots_adjust(left=0.06, right=0.94, top=0.97, bottom=0.03, hspace=0.4)
+
+        if save_path is None:
+            save_path = self.output_dir / f'{self.stock_code}_RSI策略报告.png'
+
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+
+        return fig
+
+    def _plot_trade_comparison(self, ax, trade_records, df_daily):
+        """绘制交易对比图"""
+        trade_df = pd.DataFrame([vars(t) for t in trade_records])
+        buy_trades = trade_df[trade_df['类型'] == '买入'].reset_index(drop=True)
+        sell_trades = trade_df[trade_df['类型'] == '卖出'].reset_index(drop=True)
+
+        # 计算每笔交易收益率
+        rsi_returns = []
+        bh_returns = []
+        period_labels = []
+
+        for i in range(min(len(buy_trades), len(sell_trades))):
+            buy = buy_trades.iloc[i]
+            sell = sell_trades.iloc[i]
+
+            buy_cost = buy['金额'] + buy['佣金']
+            sell_proceed = sell['金额'] - sell['佣金'] - sell['印花税']
+            rsi_return = (sell_proceed - buy_cost) / buy_cost * 100
+            rsi_returns.append(rsi_return)
+
+            buy_date = pd.to_datetime(buy['日期'])
+            sell_date = pd.to_datetime(sell['日期'])
+            period_data = df_daily[(df_daily['日期'] >= buy_date) & (df_daily['日期'] <= sell_date)]
+
+            if len(period_data) > 0:
+                bh_return = (period_data.iloc[-1]['收盘价'] / period_data.iloc[0]['收盘价'] - 1) * 100
+            else:
+                bh_return = 0
+
+            bh_returns.append(bh_return)
+            period_labels.append(f"T{i + 1}")
+
+        # 排序
+        sorted_indices = sorted(range(len(rsi_returns)), key=lambda k: rsi_returns[k], reverse=True)
+        rsi_returns_sorted = [rsi_returns[i] for i in sorted_indices]
+        bh_returns_sorted = [bh_returns[i] for i in sorted_indices]
+        labels_sorted = [period_labels[i] for i in sorted_indices]
+
+        x_pos = np.arange(len(rsi_returns_sorted))
+        width = 0.35
+
+        # 柱状图
+        rsi_colors = ['red' if r > 0 else 'green' for r in rsi_returns_sorted]
+        ax.bar(x_pos - width / 2, rsi_returns_sorted, width, color=rsi_colors, alpha=0.7,
+               edgecolor='black', label='RSI Strategy')
+
+        bh_colors = ['lightcoral' if r > 0 else 'lightgreen' for r in bh_returns_sorted]
+        ax.bar(x_pos + width / 2, bh_returns_sorted, width, color=bh_colors, alpha=0.7,
+               edgecolor='black', label='Buy & Hold', hatch='//')
+
+        ax.set_xlabel('Trading Periods')
+        ax.set_ylabel('Period Return (%)')
+        ax.set_title('Strategy vs Buy & Hold - Returns Comparison', fontsize=12, fontweight='bold')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(labels_sorted, rotation=45, fontsize=7)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+        ax.legend(loc='upper left', fontsize=8)
+
+    def print_results(self):
+        """打印回测结果"""
+        if self.current_result is None:
+            raise ValueError("请先运行回测")
+
+        r = self.current_result
+
+        print("=" * 100)
+        print(f"{self.stock_name} ({self.stock_code}) - {self.name} 回测结果".center(100))
+        print("=" * 100)
+
+        comparison_data = {
+            '绩效指标': [
+                '初始资金 (元)',
+                '最终资产 (元)',
+                '总收益率 (%)',
+                '年化收益率 (%)',
+                '最大回撤 (%)',
+                '夏普比率',
+                '交易次数',
+                '胜率 (%)',
+                '盈亏比',
+                '总手续费 (元)',
+                '盈利月数',
+                '亏损月数',
+                '平均月收益率 (%)'
+            ],
+            self.name: [
+                f"{r.initial_capital:,.2f}",
+                f"{r.final_value:,.2f}",
+                f"{r.total_return:.2f}",
+                f"{r.annual_return:.2f}",
+                f"{r.max_drawdown:.2f}",
+                f"{r.sharpe_ratio:.2f}",
+                f"{r.total_trades}",
+                f"{r.win_rate:.2f}" if r.total_trades > 0 else "-",
+                f"{r.profit_loss_ratio:.2f}" if r.total_trades > 0 else "-",
+                f"{r.total_fees:,.2f}" if r.total_trades > 0 else "-",
+                f"{r.monthly_win}",
+                f"{r.monthly_loss}",
+                f"{r.monthly_avg_return:.2f}"
+            ]
+        }
+
+        comparison_df = pd.DataFrame(comparison_data)
+        pd.set_option('display.width', None)
+        print(comparison_df.to_string(index=False))
+        print("=" * 100)
+
+        print("\n策略参数:")
+        print(f"• RSI周期: {r.params['rsi_period']}")
+        print(f"• 买入阈值: {r.params['buy_threshold']}")
+        print(f"• 卖出阈值: {r.params['sell_threshold']}")
+        print(f"• 最小间隔: {r.params['min_interval_days']}天")
+        print(f"• 回测周期: {r.start_date} 至 {r.end_date}")
+        print(f"• 交易天数: {r.trading_days} 天")
+
+    def save_results(self, prefix: str = None) -> Dict[str, str]:
+        """
+        保存回测结果
+
+        Args:
+            prefix: 文件名前缀
+
+        Returns:
+            保存的文件路径字典
+        """
+        if self.current_result is None:
+            raise ValueError("请先运行回测")
+
+        prefix = prefix or self.stock_code
+        saved_files = {}
+
+        # 保存带信号的原始数据
+        if self.df is not None:
+            signal_file = self.output_dir / f'{prefix}_with_signals.csv'
+            self.df.to_csv(signal_file, index=False, encoding='utf-8-sig')
+            saved_files['signals'] = str(signal_file)
+
+        # 保存每日资产明细
+        if self.current_result.daily_df is not None:
+            daily_file = self.output_dir / f'{prefix}_每日资产明细.csv'
+            self.current_result.daily_df.to_csv(daily_file, index=False, encoding='utf-8-sig')
+            saved_files['daily'] = str(daily_file)
+
+        # 保存交易记录
+        if self.current_result.trade_records:
+            trade_df = pd.DataFrame([vars(t) for t in self.current_result.trade_records])
+            trade_file = self.output_dir / f'{prefix}_交易记录.csv'
+            trade_df.to_csv(trade_file, index=False, encoding='utf-8-sig')
+            saved_files['trades'] = str(trade_file)
+
+        # 保存结果摘要
+        summary_file = self.output_dir / f'{prefix}_结果摘要.csv'
+        summary_data = {
+            '指标': ['股票代码', '初始资金', '最终资产', '总收益率', '年化收益率',
+                     '最大回撤', '夏普比率', '交易次数', '胜率', '盈亏比'],
+            '值': [
+                self.stock_code,
+                self.current_result.initial_capital,
+                self.current_result.final_value,
+                self.current_result.total_return,
+                self.current_result.annual_return,
+                self.current_result.max_drawdown,
+                self.current_result.sharpe_ratio,
+                self.current_result.total_trades,
+                self.current_result.win_rate,
+                self.current_result.profit_loss_ratio
+            ]
+        }
+        pd.DataFrame(summary_data).to_csv(summary_file, index=False, encoding='utf-8-sig')
+        saved_files['summary'] = str(summary_file)
+
+        print(f"\n结果已保存到: {self.output_dir}")
+        return saved_files
+
+    def run_complete_analysis(self,
+                              file_path: str = None,
+                              df: pd.DataFrame = None,
+                              stock_code: str = None,
+                              stock_name: str = None,
+                              save_results: bool = True,
+                              plot: bool = True) -> BacktestResult:
+        """
+        运行完整分析流程
+
+        Args:
+            file_path: 数据文件路径
+            df: 直接传入数据框
+            stock_code: 股票代码
+            stock_name: 股票名称
+            save_results: 是否保存结果
+            plot: 是否绘制图表
+
+        Returns:
+            回测结果对象
+        """
+        print("=" * 80)
+        print(f"开始 {self.name} 完整分析...".center(80))
+        print("=" * 80)
+
+        # 加载数据
+        if file_path:
+            self.load_data(file_path, stock_code, stock_name)
+        elif df is not None:
+            self.load_data_from_df(df, stock_code, stock_name)
+        else:
+            raise ValueError("请提供数据文件路径或数据框")
+
+        print(f"股票代码: {self.stock_code}")
+        print(f"数据行数: {len(self.df)}")
+
+        # 数据预处理
+        self.preprocess_data()
+        print("数据预处理完成")
+
+        # 计算RSI
+        self.calculate_rsi()
+        print(f"RSI计算完成 (周期={self.rsi_period})")
+
+        # 生成信号
+        self.generate_signals()
+        buy_count = len(self.df[self.df['交易信号'] == RSIStrategy.SignalType.BUY.value])
+        sell_count = len(self.df[self.df['交易信号'] == RSIStrategy.SignalType.SELL.value])
+        print(f"信号生成完成 - 买入: {buy_count}, 卖出: {sell_count}")
+
+        # 运行回测
+        result = self.run_backtest()
+        print("回测完成")
+
+        # 打印结果
+        self.print_results()
+
+        # 绘制图表
+        if plot:
+            self.plot_results()
+            print("图表已生成")
+
+        # 保存结果
+        if save_results:
+            self.save_results()
+
+        print("\n分析完成！")
+        print("=" * 80)
+
+        return result
+
+    @staticmethod
+    def compare_stocks(
+            input_source: Union[str, List[str]],
+            stock_codes: List[str] = None,
+            initial_capital: float = None,
+            rsi_period: int = None,
+            buy_threshold: int = None,
+            sell_threshold: int = None,
+            min_interval_days: int = None,
+            commission_rate: float = None,
+            stamp_tax_rate: float = None,
+            output_dir: str = None,
+            save_results: bool = True, #单个股票结果是否展示和保存
+            plot: bool = True #单个股票图表是否展示和保存
+    ) -> pd.DataFrame:
+        """
+        多股票比较 - 支持自定义参数
+        """
+
+        # ============ 1. 参数处理 ============
+        # 创建临时实例获取默认值
+        temp_strategy = RSIStrategy(output_dir=output_dir) if output_dir else RSIStrategy()
+
+        params = {
+            'initial_capital': initial_capital if initial_capital is not None else temp_strategy.initial_capital,
+            'commission_rate': commission_rate if commission_rate is not None else temp_strategy.commission_rate,
+            'min_commission': temp_strategy.min_commission,
+            'stamp_tax_rate': stamp_tax_rate if stamp_tax_rate is not None else temp_strategy.stamp_tax_rate,
+            'buy_threshold': buy_threshold if buy_threshold is not None else temp_strategy.buy_threshold,
+            'sell_threshold': sell_threshold if sell_threshold is not None else temp_strategy.sell_threshold,
+            'rsi_period': rsi_period if rsi_period is not None else temp_strategy.rsi_period,
+            'min_interval_days': min_interval_days if min_interval_days is not None else temp_strategy.min_interval_days,
+            'output_dir': Path(output_dir) if output_dir else Path(temp_strategy.output_dir),
+            'save_results': save_results,
+            'plot': plot
+        }
+
+        # 创建输出目录
+        params['output_dir'].mkdir(parents=True, exist_ok=True)
+
+        # ============ 2. 获取所有文件路径 ============
+        stock_files = []
+        custom_codes = []
+
+        if isinstance(input_source, str):
+            folder_path = Path(input_source)
+            if not folder_path.exists():
+                raise ValueError(f"文件夹不存在: {folder_path}")
+
+            stock_files = list(folder_path.glob("*.csv"))
+            if not stock_files:
+                raise ValueError(f"文件夹中没有CSV文件: {folder_path}")
+
+            print(f"📁 从文件夹读取到 {len(stock_files)} 个CSV文件")
+            custom_codes = [f.stem.split('_')[2] if '_' in f.stem else f.stem for f in stock_files]
+
+        elif isinstance(input_source, list):
+            stock_files = [Path(f) for f in input_source]
+            for f in stock_files:
+                if not f.exists():
+                    raise ValueError(f"文件不存在: {f}")
+
+            print(f"📄 读取到 {len(stock_files)} 个文件")
+
+            if stock_codes and len(stock_codes) == len(stock_files):
+                custom_codes = stock_codes
+            else:
+                custom_codes = [f.stem.split('_')[2] if '_' in f.stem else f.stem for f in stock_files]
+        else:
+            raise ValueError("input_source必须是文件夹路径或文件路径列表")
+
+        # 打印使用的参数
+        print("\n📌 本次比较使用的参数:")
+        print(f"   • 初始资金: {params['initial_capital']:,.0f}元")
+        print(f"   • RSI周期: {params['rsi_period']}")
+        print(f"   • 买入阈值: {params['buy_threshold']}")
+        print(f"   • 卖出阈值: {params['sell_threshold']}")
+        print(f"   • 最小间隔: {params['min_interval_days']}天")
+        print(f"   • 佣金费率: {params['commission_rate'] * 100}%")
+        print(f"   • 印花税率: {params['stamp_tax_rate'] * 100}%")
+
+        # ============ 3. 定义辅助函数 ============
+        def calculate_hold_drawdown(daily_df):
+            """计算买入持有最大回撤"""
+            try:
+                if daily_df is None or '买入持有资产' not in daily_df.columns:
+                    return 0.0
+
+                # 计算累计最大值
+                cummax = daily_df['买入持有资产'].cummax()
+                # 避免除零错误
+                mask = cummax > 0
+                drawdown = pd.Series(0.0, index=daily_df.index)
+                drawdown[mask] = (daily_df.loc[mask, '买入持有资产'] - cummax[mask]) / cummax[mask] * 100
+                drawdown = drawdown.clip(upper=0)
+
+                return drawdown.min() if not drawdown.empty else 0.0
+            except Exception as e:
+                warnings.warn(f"计算买入持有回撤时出错: {e}")
+                return 0.0
+
+        def calculate_hold_sharpe(daily_df):
+            """计算买入持有夏普比率"""
+            try:
+                if daily_df is None:
+                    return 0.0
+
+                # 计算日收益率
+                if '买入持有日收益率' not in daily_df.columns:
+                    if '买入持有资产' in daily_df.columns:
+                        daily_df['买入持有日收益率'] = daily_df['买入持有资产'].pct_change()
+                    else:
+                        return 0.0
+
+                hold_returns = daily_df['买入持有日收益率'].dropna()
+                hold_returns = hold_returns[np.isfinite(hold_returns)]
+
+                risk_free_rate = 0.03
+
+                if len(hold_returns) > 1 and hold_returns.std() > 1e-8:
+                    excess_returns = hold_returns - risk_free_rate / 245
+                    sharpe = np.sqrt(245) * excess_returns.mean() / hold_returns.std()
+                    return sharpe
+                return 0.0
+            except Exception as e:
+                warnings.warn(f"计算买入持有夏普比率时出错: {e}")
+                return 0.0
+
+        # ============ 4. 执行回测 ============
+        results = []
+
+        print("\n" + "=" * 100)
+        print("多股票策略比较分析".center(100))
+        print("=" * 100)
+
+        for i, (file_path, code) in enumerate(zip(stock_files, custom_codes)):
+            print(f"\n▶ 正在处理 [{i + 1}/{len(stock_files)}] {code}...")
+
+            try:
+                # 创建新实例
+                strategy = RSIStrategy(
+                    name=f"RSI策略_{code}",
+                    initial_capital=params['initial_capital'],
+                    commission_rate=params['commission_rate'],
+                    min_commission=params['min_commission'],
+                    stamp_tax_rate=params['stamp_tax_rate'],
+                    buy_threshold=params['buy_threshold'],
+                    sell_threshold=params['sell_threshold'],
+                    rsi_period=params['rsi_period'],
+                    min_interval_days=params['min_interval_days'],
+                    output_dir=params['output_dir'] / code  # 每个股票单独的输出目录
+                )
+
+                # 执行分析
+                result = strategy.run_complete_analysis(
+                    file_path=str(file_path),
+                    stock_code=code,
+                    save_results=params['save_results'],
+                    plot=params['plot'],
+                )
+
+                results.append(result)
+                print(f"  ✓ 完成 - 收益率: {result.total_return:.2f}%")
+
+            except Exception as e:
+                print(f"  ✗ 失败: {str(e)}")
+                continue
+
+        if not results:
+            raise ValueError("没有成功处理任何股票")
+
+        # ============ 5. 创建比较表格 ============
+        comparison_data = []
+        for r in results:
+            try:
+                hold_return = (r.daily_df['买入持有资产'].iloc[-1] / r.initial_capital - 1) * 100
+                hold_dd = calculate_hold_drawdown(r.daily_df)
+                hold_sharpe = calculate_hold_sharpe(r.daily_df)
+                excess_return = r.total_return - hold_return
+                dd_improve = r.max_drawdown - hold_dd
+
+                comparison_data.append({
+                    '股票代码': r.code,
+                    '策略总收益率(%)': r.total_return,
+                    '策略年化收益率(%)': r.annual_return,
+                    '策略最大回撤(%)': r.max_drawdown,
+                    '策略夏普比率': r.sharpe_ratio,
+                    '策略胜率(%)': r.win_rate,
+                    '策略盈亏比': r.profit_loss_ratio,
+                    '策略交易次数': r.total_trades,
+                    '买入持有收益率(%)': hold_return,
+                    '买入持有最大回撤(%)': hold_dd,
+                    '买入持有夏普比率': hold_sharpe,
+                    '超额收益(%)': excess_return,
+                    '回撤改善(%)': dd_improve
+                })
+            except Exception as e:
+                warnings.warn(f"处理股票 {r.code} 的数据时出错: {e}")
+                continue
+
+        comparison = pd.DataFrame(comparison_data)
+
+        if comparison.empty:
+            raise ValueError("没有有效的比较数据")
+
+        # ============ 6. 控制台输出 ============
+        print("\n" + "=" * 100)
+        print("策略应用整体效果总结".center(100))
+        print("=" * 100)
+
+        # 计算各项指标
+        beat_benchmark_pct = (comparison['策略总收益率(%)'] > comparison['买入持有收益率(%)']).mean() * 100
+        drawdown_improved_pct = (comparison['回撤改善(%)'] > 0).mean() * 100
+
+        avg_strategy_dd = comparison['策略最大回撤(%)'].mean()
+        avg_hold_dd = comparison['买入持有最大回撤(%)'].mean()
+
+        avg_strategy_sharpe = comparison['策略夏普比率'].mean()
+        avg_hold_sharpe = comparison['买入持有夏普比率'].mean()
+
+        avg_win_rate = comparison['策略胜率(%)'].mean()
+        avg_profit_loss = comparison['策略盈亏比'].mean()
+        avg_trades = comparison['策略交易次数'].mean()
+
+        # 格式化输出
+        print(f"\n📊 跑赢基准比例: {beat_benchmark_pct:.1f}%")
+        print(f"📉 回撤改善比例: {drawdown_improved_pct:.1f}%")
+        print(f"📈 策略平均回撤 vs 买入持有平均回撤：{avg_strategy_dd:.1f}% vs {avg_hold_dd:.1f}%")
+        print(f"⚡ 策略平均夏普 vs 买入持有平均夏普：{avg_strategy_sharpe:.2f} vs {avg_hold_sharpe:.2f}")
+        print(
+            f"🎯 策略整体表现：平均胜率{avg_win_rate:.1f}%，平均盈亏比{avg_profit_loss:.2f}，平均交易次数{avg_trades:.0f}次")
+
+        print(f"\n📌 统计信息:")
+        print(f"   • 成功分析股票数量: {len(comparison)}/{len(stock_files)}")
+        print(f"   • 最大超额收益: {comparison['超额收益(%)'].max():.2f}%")
+        print(f"   • 最大回撤改善: {comparison['回撤改善(%)'].max():.2f}%")
+        print(f"   • 最佳夏普比率: {comparison['策略夏普比率'].max():.2f}")
+
+        # ============ 7. 绘图展示 ============
+        plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+
+        # 创建2x2子图布局 - 使用constrained_layout避免tight_layout警告
+        fig = plt.figure(figsize=(20, 16), constrained_layout=True)
+        gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+
+        # ===== 子图a：最大回撤分布对比直方图（绝对值，0-1范围） =====
+        ax1 = fig.add_subplot(gs[0, 0])
+
+        # 提取数据并转换为绝对值（正数）
+        strategy_dd = abs(comparison['策略最大回撤(%)'].dropna()) / 100  # 转换为0-1范围
+        hold_dd = abs(comparison['买入持有最大回撤(%)'].dropna()) / 100  # 转换为0-1范围
+
+        if len(strategy_dd) > 0 and len(hold_dd) > 0:
+            # 统计超出1的股票数
+            strategy_outliers = (strategy_dd > 1).sum()
+            hold_outliers = (hold_dd > 1).sum()
+
+            # 限制在0-1范围内
+            strategy_dd = strategy_dd.clip(upper=1)
+            hold_dd = hold_dd.clip(upper=1)
+
+            # 设置bins：0-1范围，每0.02一个柱子
+            bins = np.arange(0, 1.02, 0.02)
+
+            # 绘制直方图
+            ax1.hist(strategy_dd, bins=bins, alpha=0.7, color='red',
+                     edgecolor='black', label='RSI策略', density=True)
+            ax1.hist(hold_dd, bins=bins, alpha=0.5, color='blue',
+                     edgecolor='black', label='买入持有', density=True)
+
+            # 添加均值线
+            ax1.axvline(strategy_dd.mean(), color='darkred', linestyle='--', linewidth=2,
+                        label=f'策略均值: {strategy_dd.mean():.2f}')
+            ax1.axvline(hold_dd.mean(), color='darkblue', linestyle='--', linewidth=2,
+                        label=f'买入持有均值: {hold_dd.mean():.2f}')
+
+            # 添加超出范围的提示
+            if strategy_outliers > 0 or hold_outliers > 0:
+                outlier_text = f'超出范围(>100%):\n策略: {strategy_outliers}只\n买入持有: {hold_outliers}只'
+                ax1.text(0.98, 0.98, outlier_text, transform=ax1.transAxes, fontsize=9,
+                         verticalalignment='top', horizontalalignment='right',
+                         bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+        else:
+            ax1.text(0.5, 0.5, '无有效回撤数据', ha='center', va='center',
+                     transform=ax1.transAxes, fontsize=14)
+
+        ax1.set_xlabel('最大回撤 (绝对值)', fontsize=12)
+        ax1.set_ylabel('概率密度', fontsize=12)
+        ax1.set_title('a. 最大回撤分布对比 (绝对值)', fontsize=14, fontweight='bold')
+        ax1.set_xlim(0, 1)
+        ax1.set_xticks(np.arange(0, 1.1, 0.1))
+        ax1.set_xticklabels([f'{x:.2f}' for x in np.arange(0, 1.1, 0.1)])
+        ax1.legend(loc='upper right', fontsize=10)
+        ax1.grid(True, alpha=0.3)
+
+        # ===== 子图b：胜率 vs 盈亏比四象限散点图（去掉股票代码标签） =====
+        ax2 = fig.add_subplot(gs[0, 1])
+
+        win_rate = comparison['策略胜率(%)'].dropna() / 100  # 转换为0-1范围
+        pl_ratio = comparison['策略盈亏比'].dropna()
+        sharpe = comparison['策略夏普比率'].dropna()
+
+        if len(win_rate) > 0 and len(pl_ratio) > 0 and len(sharpe) > 0:
+            # 计算四分位点
+            win_median = win_rate.median()
+            pl_median = pl_ratio.median()
+
+            # 绘制四象限分割线
+            ax2.axhline(y=pl_median, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+            ax2.axvline(x=win_median, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+
+            # 添加象限标签
+            ax2.text(0.02, 0.98, '高盈亏比\n低胜率', transform=ax2.transAxes, fontsize=9,
+                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+            ax2.text(0.98, 0.98, '高盈亏比\n高胜率', transform=ax2.transAxes, fontsize=9,
+                     verticalalignment='top', horizontalalignment='right',
+                     bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
+            ax2.text(0.02, 0.02, '低盈亏比\n低胜率', transform=ax2.transAxes, fontsize=9,
+                     verticalalignment='bottom',
+                     bbox=dict(boxstyle='round', facecolor='lightcoral', alpha=0.5))
+            ax2.text(0.98, 0.02, '低盈亏比\n高胜率', transform=ax2.transAxes, fontsize=9,
+                     verticalalignment='bottom', horizontalalignment='right',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+            # 散点图，点变小，不带标签
+            scatter = ax2.scatter(win_rate, pl_ratio,
+                                  c=sharpe, cmap='RdYlGn',
+                                  s=30, alpha=0.6, edgecolors='black', linewidth=0.5, zorder=5)  # s从100改为30
+
+            # 添加颜色条
+            cbar = plt.colorbar(scatter, ax=ax2, label='夏普比率')
+            cbar.ax.tick_params(labelsize=8)
+
+            # 添加统计信息
+            stats_text = f'胜率中位数: {win_median:.1%}\n盈亏比中位数: {pl_median:.2f}'
+            ax2.text(0.02, 0.02, stats_text, transform=ax2.transAxes, fontsize=8,
+                     verticalalignment='bottom',
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+        else:
+            ax2.text(0.5, 0.5, '无有效数据', ha='center', va='center',
+                     transform=ax2.transAxes, fontsize=14)
+
+        ax2.set_xlabel('胜率', fontsize=12)
+        ax2.set_ylabel('盈亏比', fontsize=12)
+        ax2.set_title('b. 策略胜率 vs 盈亏比分布', fontsize=14, fontweight='bold')
+        ax2.set_xlim(0, 1)
+        ax2.set_xticks(np.arange(0, 1.1, 0.2))
+        ax2.set_xticklabels([f'{x:.0%}' for x in np.arange(0, 1.1, 0.2)])
+        ax2.grid(True, alpha=0.3)
+
+        # ===== 子图c：策略收益率 vs 买入持有收益率散点图（数值/100） =====
+        ax3 = fig.add_subplot(gs[1, 0])
+
+        # 转换为0-1范围（除以100）
+        strategy_return = comparison['策略总收益率(%)'].dropna() / 100
+        hold_return = comparison['买入持有收益率(%)'].dropna() / 100
+        excess_return = comparison['超额收益(%)'].dropna() / 100
+
+        if len(strategy_return) > 0 and len(hold_return) > 0 and len(excess_return) > 0:
+            # 计算收益率范围
+            max_return = max(strategy_return.max(), hold_return.max())
+            min_return = min(strategy_return.min(), hold_return.min())
+            margin = (max_return - min_return) * 0.1 if max_return != min_return else 0.1
+
+            # 绘制45°对角线
+            line_x = [min_return - margin, max_return + margin]
+            line_y = [min_return - margin, max_return + margin]
+            ax3.plot(line_x, line_y, '--', color='gray', alpha=0.5, linewidth=2, label='收益率相等')
+
+            # 填充区域
+            ax3.fill_between(line_x, line_y, max_return + margin,
+                             alpha=0.1, color='green', label='策略跑赢')
+            ax3.fill_between(line_x, min_return - margin, line_y,
+                             alpha=0.1, color='red', label='策略跑输')
+
+            # 散点图，点变小，不带标签
+            scatter = ax3.scatter(hold_return, strategy_return,
+                                  c=excess_return, cmap='RdYlGn',
+                                  s=30, alpha=0.6, edgecolors='black', linewidth=0.5, zorder=5)  # s从100改为30
+
+            # 添加颜色条
+            cbar = plt.colorbar(scatter, ax=ax3, label='超额收益')
+            cbar.ax.tick_params(labelsize=8)
+            cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.0%}'))
+
+            # 添加统计信息
+            stats_text = f'跑赢基准: {(strategy_return > hold_return).sum()}/{len(strategy_return)}\n'
+            stats_text += f'平均超额: {excess_return.mean():.2%}'
+            ax3.text(0.02, 0.98, stats_text, transform=ax3.transAxes, fontsize=8,
+                     verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+        else:
+            ax3.text(0.5, 0.5, '无有效数据', ha='center', va='center',
+                     transform=ax3.transAxes, fontsize=14)
+
+        ax3.set_xlabel('买入持有收益率', fontsize=12)
+        ax3.set_ylabel('策略收益率', fontsize=12)
+        ax3.set_title('c. 策略 vs 买入持有收益率对比', fontsize=14, fontweight='bold')
+        ax3.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.0%}'))
+        ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.0%}'))
+        ax3.legend(loc='upper left', fontsize=10)
+        ax3.grid(True, alpha=0.3)
+
+        # ===== 子图d：超额收益 vs 回撤改善四象限散点图（数值/100，纵轴最大1） =====
+        ax4 = fig.add_subplot(gs[1, 1])
+
+        # 转换为0-1范围（除以100）
+        excess = comparison['超额收益(%)'].dropna() / 100
+        dd_improve = comparison['回撤改善(%)'].dropna() / 100
+        sharpe = comparison['策略夏普比率'].dropna()
+
+        if len(excess) > 0 and len(dd_improve) > 0 and len(sharpe) > 0:
+            # 计算四分位点
+            excess_median = excess.median()
+            dd_improve_median = dd_improve.median()
+
+            # 绘制四象限分割线
+            ax4.axhline(y=0, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+            ax4.axvline(x=0, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+
+            # 散点图，点变小，不带标签
+            scatter = ax4.scatter(excess, dd_improve,
+                                  c=sharpe, cmap='RdYlGn',
+                                  s=30, alpha=0.6, edgecolors='black', linewidth=0.5, zorder=5)  # s从100改为30
+
+            # 添加颜色条
+            cbar = plt.colorbar(scatter, ax=ax4, label='夏普比率')
+            cbar.ax.tick_params(labelsize=8)
+
+            # 添加统计信息
+            stats_text = f'超额中位数: {excess_median:.2%}\n'
+            stats_text += f'改善中位数: {dd_improve_median:.2%}'
+            ax4.text(0.02, 0.98, stats_text, transform=ax4.transAxes, fontsize=8,
+                     verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+        else:
+            ax4.text(0.5, 0.5, '无有效数据', ha='center', va='center',
+                     transform=ax4.transAxes, fontsize=14)
+
+        ax4.set_xlabel('超额收益', fontsize=12)
+        ax4.set_ylabel('回撤改善', fontsize=12)
+        ax4.set_title('d. 超额收益 vs 回撤改善分布', fontsize=14, fontweight='bold')
+        ax4.set_ylim(-1, 1)  # 纵轴最大值设为1
+        ax4.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.0%}'))
+        ax4.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.0%}'))
+        ax4.grid(True, alpha=0.3)
+
+        # 添加整体标题
+        plt.suptitle(f'多股票RSI策略比较分析 (共{len(comparison)}只股票)',
+                     fontsize=16, fontweight='bold', y=0.98)
+
+        # 保存图片
+        comp_file = Path(params['output_dir']) / '多股票比较_详细分析.png'
+        plt.savefig(comp_file, dpi=300, bbox_inches='tight')
+        plt.show()
+
+        # 保存比较结果CSV
+        comparison_export = comparison.copy()
+
+        # 处理数值列的显示格式
+        for col in comparison_export.columns:
+            if col == '股票代码':
+                continue
+            elif col == '策略交易次数':
+                # 交易次数保持整数
+                comparison_export[col] = comparison_export[col].astype(int)
+            elif col == '策略夏普比率' or col == '买入持有夏普比率':
+                comparison_export[col] = comparison_export[col]
+            else:
+                # 其他数值列/100
+                comparison_export[col] = comparison_export[col]/100
+
+        # 保存CSV
+        comp_csv = Path(params['output_dir']) / '多股票比较_详细数据.csv'
+        comparison_export.to_csv(comp_csv, index=False, encoding='utf-8-sig')
+
+        print("\n" + "=" * 100)
+        print("分析完成！".center(100))
+        print("=" * 100)
+        print(f"📁 详细数据已保存到: {comp_csv}")
+        print(f"📊 分析图表已保存到: {comp_file}")
+
+        return comparison
+
+    @staticmethod
+    def compare_parameters(
+            file_dir: str,  # 输入的文件地址
+            stock_codes: List[str] = None,
+            initial_capital: float = None,
+            rsi_parameters: List[List] = None,  # rsi参数组合，包括rsi_period，buy_threshold，sell_threshold三个参数的列表集合
+            min_interval_days: int = None,
+            commission_rate: float = None,
+            stamp_tax_rate: float = None,
+            output_dir: str = None,
+    ) -> pd.DataFrame:
+        """
+        对比不同的RSI参数策略作用于同一只股票的效果
+
+        Args:
+            file_dir: 股票数据文件路径
+            stock_codes: 股票代码列表（如果文件是单个股票，可以传入单个股票代码）
+            initial_capital: 初始资金
+            rsi_parameters: RSI参数组合列表，例如 [[14,30,70], [9,25,75], [21,20,80]]
+                           每个子列表包含 [rsi_period, buy_threshold, sell_threshold]
+            min_interval_days: 最小间隔天数
+            commission_rate: 佣金费率
+            stamp_tax_rate: 印花税率
+            output_dir: 输出目录
+
+        Returns:
+            参数对比结果数据框
+        """
+
+        # ============ 1. 参数处理 ============
+        # 创建临时实例获取默认值
+        temp_strategy = RSIStrategy(output_dir=output_dir) if output_dir else RSIStrategy()
+
+        # 处理rsi_parameters
+        if rsi_parameters is None:
+            # 默认参数组合
+            rsi_parameters = [
+                [9, 25, 75],  # 短期RSI，激进
+                [14, 30, 70],  # 标准RSI
+                [21, 40, 60],  # 长期RSI，保守
+            ]
+
+        # 基础参数
+        base_params = {
+            'initial_capital': initial_capital if initial_capital is not None else temp_strategy.initial_capital,
+            'commission_rate': commission_rate if commission_rate is not None else temp_strategy.commission_rate,
+            'min_commission': temp_strategy.min_commission,
+            'stamp_tax_rate': stamp_tax_rate if stamp_tax_rate is not None else temp_strategy.stamp_tax_rate,
+            'min_interval_days': min_interval_days if min_interval_days is not None else temp_strategy.min_interval_days,
+            'output_dir': Path(output_dir) if output_dir else Path(temp_strategy.output_dir) / "parameter_comparison",
+        }
+
+        # 创建输出目录
+        base_params['output_dir'].mkdir(parents=True, exist_ok=True)
+
+        # ============ 2. 获取文件路径 ============
+        file_path = Path(file_dir)
+        if not file_path.exists():
+            raise ValueError(f"文件不存在: {file_path}")
+
+        # 处理股票代码
+        if stock_codes and len(stock_codes) > 0:
+            stock_code = stock_codes[0]
+        else:
+            stock_code = file_path.stem.split('_')[2] if '_' in file_path.stem else file_path.stem
+
+        print("\n" + "=" * 100)
+        print(f"RSI参数对比分析 - 股票: {stock_code}".center(100))
+        print("=" * 100)
+
+        print(f"\n📌 基础参数:")
+        print(f"   • 初始资金: {base_params['initial_capital']:,.0f}元")
+        print(f"   • 最小间隔: {base_params['min_interval_days']}天")
+        print(f"   • 佣金费率: {base_params['commission_rate'] * 100}%")
+        print(f"   • 印花税率: {base_params['stamp_tax_rate'] * 100}%")
+
+        print(f"\n📊 待测试的RSI参数组合 ({len(rsi_parameters)}组):")
+        for i, params in enumerate(rsi_parameters):
+            print(f"   组合{i + 1}: RSI周期={params[0]}, 买入阈值={params[1]}, 卖出阈值={params[2]}")
+
+        # ============ 3. 执行回测 ============
+        results = []
+        nav_data = {}  # 存储净值数据用于绘图
+
+        print("\n" + "=" * 100)
+        print("开始回测...".center(100))
+        print("=" * 100)
+
+        for i, params in enumerate(rsi_parameters):
+            rsi_period, buy_threshold, sell_threshold = params
+
+            print(f"\n▶ 测试组合{i + 1}: RSI周期={rsi_period}, 买入={buy_threshold}, 卖出={sell_threshold}")
+
+            try:
+                # 创建策略实例
+                strategy = RSIStrategy(
+                    name=f"RSI_{rsi_period}_{buy_threshold}_{sell_threshold}",
+                    initial_capital=base_params['initial_capital'],
+                    commission_rate=base_params['commission_rate'],
+                    min_commission=base_params['min_commission'],
+                    stamp_tax_rate=base_params['stamp_tax_rate'],
+                    buy_threshold=buy_threshold,
+                    sell_threshold=sell_threshold,
+                    rsi_period=rsi_period,
+                    min_interval_days=base_params['min_interval_days'],
+                    output_dir=base_params['output_dir'] / f"param_{i + 1}"
+                )
+
+                # 执行分析
+                result = strategy.run_complete_analysis(
+                    file_path=str(file_path),
+                    stock_code=stock_code,
+                    save_results=False,
+                    plot=False,
+                )
+
+                results.append({
+                    '参数名称': f'RSI({rsi_period},{buy_threshold},{sell_threshold})',
+                    'rsi_period': rsi_period,
+                    'buy_threshold': buy_threshold,
+                    'sell_threshold': sell_threshold,
+                    'result': result,
+                    'nav': result.daily_df[['日期', '资产总值']].copy()
+                })
+
+                # 存储净值数据
+                nav_data[f'策略{i + 1}'] = result.daily_df[['日期', '资产总值']].copy()
+
+                print(f"  ✓ 完成 - 收益率: {result.total_return:.2f}%, 夏普: {result.sharpe_ratio:.2f}")
+
+            except Exception as e:
+                print(f"  ✗ 失败: {str(e)}")
+                continue
+
+        if not results:
+            raise ValueError("没有成功测试任何参数组合")
+
+        # ============ 4. 定义辅助函数(买入持有最大回撤) ============
+        def calculate_hold_drawdown(daily_df):
+            """计算买入持有最大回撤"""
+            try:
+                if daily_df is None or '买入持有资产' not in daily_df.columns:
+                    return 0.0
+
+                # 计算累计最大值
+                cummax = daily_df['买入持有资产'].cummax()
+                # 避免除零错误
+                mask = cummax > 0
+                drawdown = pd.Series(0.0, index=daily_df.index)
+                drawdown[mask] = (daily_df.loc[mask, '买入持有资产'] - cummax[mask]) / cummax[mask] * 100
+                drawdown = drawdown.clip(upper=0)
+
+                return drawdown.min() if not drawdown.empty else 0.0
+            except Exception as e:
+                warnings.warn(f"计算买入持有回撤时出错: {e}")
+                return 0.0
+
+        # ============ 4. 获取买入持有数据 ============
+        # 重新运行一个基础策略来获取买入持有数据
+        base_strategy = RSIStrategy(
+            name="买入持有",
+            initial_capital=base_params['initial_capital'],
+            commission_rate=base_params['commission_rate'],
+            min_commission=base_params['min_commission'],
+            stamp_tax_rate=base_params['stamp_tax_rate'],
+            output_dir=base_params['output_dir'] / "baseline"
+        )
+
+        base_result = base_strategy.run_complete_analysis(
+            file_path=str(file_path),
+            stock_code=stock_code,
+            save_results=False,
+            plot=False,
+        )
+
+        # 计算买入持有指标
+        hold_return = (base_result.daily_df['买入持有资产'].iloc[-1] / base_params['initial_capital'] - 1) * 100
+        hold_dd = calculate_hold_drawdown(base_result.daily_df)
+        hold_sharpe = base_strategy._calculate_hold_sharpe(base_result.daily_df)
+
+        # ============ 5. 创建对比表格 ============
+        comparison_data = []
+        for r in results:
+            excess_return = r['result'].total_return - hold_return
+            dd_improve = r['result'].max_drawdown - hold_dd
+
+            comparison_data.append({
+                '参数组合': r['参数名称'],
+                '总收益率(%)': r['result'].total_return,
+                '年化收益率(%)': r['result'].annual_return,
+                '最大回撤(%)': r['result'].max_drawdown,
+                '夏普比率': r['result'].sharpe_ratio,
+                '胜率(%)': r['result'].win_rate,
+                '盈亏比': r['result'].profit_loss_ratio,
+                '交易次数': r['result'].total_trades,
+                '超额收益(%)': excess_return,
+                '回撤改善(%)': dd_improve
+            })
+
+        # 添加买入持有作为基准
+        comparison_data.append({
+            '参数组合': '买入持有',
+            '总收益率(%)': hold_return,
+            '年化收益率(%)': ((base_result.daily_df['买入持有资产'].iloc[-1] / base_params['initial_capital']) ** (
+                        1 / (len(base_result.daily_df[~base_result.daily_df['是停牌']]) / 245)) - 1) * 100,
+            '最大回撤(%)': hold_dd,
+            '夏普比率': hold_sharpe,
+            '胜率(%)': 100 if hold_return > 0 else 0,
+            '盈亏比': '-',
+            '交易次数': 1,
+            '超额收益(%)': 0,
+            '回撤改善(%)': 0
+        })
+
+        comparison = pd.DataFrame(comparison_data)
+
+        # ============ 6. 控制台输出对比表格 ============
+        print("\n" + "=" * 100)
+        print("RSI参数对比结果".center(100))
+        print("=" * 100)
+
+        # 使用tabulate打印表格
+        table_data = []
+        for _, row in comparison.iterrows():
+            table_data.append([
+                row['参数组合'],
+                f"{row['总收益率(%)']:.2f}%",
+                f"{row['最大回撤(%)']:.2f}%",
+                f"{row['夏普比率']:.2f}",
+                f"{row['超额收益(%)']:+.2f}%" if row['参数组合'] != '买入持有' else '-',
+                f"{row['回撤改善(%)']:+.2f}%" if row['参数组合'] != '买入持有' else '-',
+                f"{row['交易次数']}" if row['参数组合'] != '买入持有' else '-'
+            ])
+
+        headers = ['参数组合', '收益率', '最大回撤', '夏普', '超额收益', '回撤改善', '交易次数']
+        print(tabulate(table_data, headers=headers, tablefmt='grid'))
+
+        # 找出最佳参数
+        param_results = comparison[comparison['参数组合'] != '买入持有'].copy()
+        if not param_results.empty:
+            best_sharpe = param_results.loc[param_results['夏普比率'].idxmax()]
+            best_return = param_results.loc[param_results['总收益率(%)'].idxmax()]
+
+            print(f"\n🏆 最佳参数（按夏普比率）: {best_sharpe['参数组合']}")
+            print(
+                f"   夏普比率: {best_sharpe['夏普比率']:.2f}, 收益率: {best_sharpe['总收益率(%)']:.2f}%, 回撤: {best_sharpe['最大回撤(%)']:.2f}%")
+
+            print(f"\n📈 最佳参数（按收益率）: {best_return['参数组合']}")
+            print(
+                f"   收益率: {best_return['总收益率(%)']:.2f}%, 夏普: {best_return['夏普比率']:.2f}, 回撤: {best_return['最大回撤(%)']:.2f}%")
+
+        # ============ 7. 绘制净值对比曲线 ============
+        plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+
+        fig, ax = plt.subplots(figsize=(14, 8))
+
+        # 绘制买入持有曲线
+        ax.plot(base_result.daily_df['日期'], base_result.daily_df['买入持有资产'] / base_params['initial_capital'],
+                color='black', linewidth=2, linestyle='--', label='买入持有', alpha=0.7)
+
+        # 为不同参数组合使用不同颜色
+        colors = plt.cm.tab10(np.linspace(0, 1, len(results)))
+
+        for i, (r, color) in enumerate(zip(results, colors)):
+            # 计算净值（归一化到初始资金）
+            nav = r['nav']['资产总值'] / base_params['initial_capital']
+            ax.plot(r['nav']['日期'], nav, color=color, linewidth=1.5,
+                    label=r['参数名称'], alpha=0.8)
+
+        ax.set_xlabel('日期', fontsize=12)
+        ax.set_ylabel('净值 (初始资金=1)', fontsize=12)
+        ax.set_title(f'不同RSI参数策略净值对比 - {stock_code}', fontsize=14, fontweight='bold')
+        ax.legend(loc='upper left', fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+        # 设置日期格式
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        ax.tick_params(axis='x', rotation=45)
+
+        # 添加水平线 y=1（初始资金线）
+        ax.axhline(y=1, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
+
+        plt.tight_layout()
+
+        # 保存图片
+        comp_file = base_params['output_dir'] / f'{stock_code}_参数对比_净值曲线.png'
+        plt.savefig(comp_file, dpi=300, bbox_inches='tight')
+        plt.show()
+
+        # ============ 8. 保存结果 ============
+        # 保存比较结果CSV
+        comparison_export = comparison.copy()
+
+        # 处理数值列的显示格式
+        for col in comparison_export.columns:
+            if col == '参数组合':
+                continue
+            elif col == '夏普比率' or col == '盈亏比' or col == '交易次数':
+                comparison_export[col] = comparison_export[col]
+            else:
+                # 其他数值列/100
+                if comparison_export[col].dtype == 'object':
+                    # 已经是字符串，不需要转换
+                    pass
+                else: comparison_export[col] = comparison_export[col] / 100
+
+        # 保存对比表格
+        comp_csv = base_params['output_dir'] / f'{stock_code}_参数对比_详细数据.csv'
+        comparison_export.to_csv(comp_csv, index=False, encoding='utf-8-sig')
+
+        print("\n" + "=" * 100)
+        print("分析完成！".center(100))
+        print("=" * 100)
+        print(f"📁 详细数据已保存到: {comp_csv}")
+        print(f"📊 净值曲线图已保存到: {comp_file}")
+
+        return comparison
 

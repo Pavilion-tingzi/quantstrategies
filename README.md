@@ -1,20 +1,22 @@
 # 量化交易策略回测系统
 
-基于 Python 的股票量化交易策略回测系统，实现了**双均线策略**和**RSI 策略**的完整回测框架，支持多股票对比分析和策略效果比较。
+基于 Python 的股票量化交易策略回测系统，实现了**双均线策略**、**RSI策略**和**布林带策略**的完整回测框架，支持多股票对比分析、参数优化和策略效果比较。
 
 ## 📁 项目结构
 
 ```
 quant/
 ├── run.py                      # 主程序入口，演示各种使用场景
-├── strategies.py               # 核心策略实现（双均线策略 + RSI 策略）
+├── strategies.py               # 核心策略实现（双均线策略 + RSI策略 + 布林带策略）
 ├── getdata_hs300.py           # 获取沪深 300 成分股日交易数据
 ├── dealdata.py                # 数据清洗脚本
-├── compare_rsi_ma.py          # 双均线策略与 RSI 策略对比分析
 ├── data/                      # 原始股票数据存储目录
 ├── data_dealed/               # 清洗后的数据存储目录
-├── compare_ma_rsi/            # 策略对比图表输出目录
-└── *.csv                      # 多股票对比结果文件
+├── ma_results/                # 双均线策略结果输出目录
+├── rsi_results/               # RSI策略结果输出目录
+├── boll_results/              # 布林带策略结果输出目录
+├── compare_strategies/        # 多策略对比图表输出目录
+└── 分析报告/                  # 生成的回测报告目录
 ```
 
 ## ✨ 主要功能模块
@@ -32,42 +34,69 @@ quant/
    - 清洗后的数据保存到 `data_dealed/` 目录
 
 ### 3️⃣ **策略实现模块** (`strategies.py`)
-   - **双均线策略 (MA Strategy)**
-     - 短期均线上穿长期均线 → 买入信号
-     - 短期均线下穿长期均线 → 卖出信号
+   - **双均线策略 (DoubleMovingAverageStrategy)**
+     - 短期均线上穿长期均线 → 买入信号（金叉）
+     - 短期均线下穿长期均线 → 卖出信号（死叉）
      - 考虑涨跌停限制、交易延迟、整手交易
+     - 支持止损功能
    
-   - **RSI 策略 (Relative Strength Index Strategy)**
+   - **RSI策略 (RSIStrategy)**
      - RSI < 超卖阈值 → 买入信号
      - RSI > 超买阈值 → 卖出信号
      - 支持参数自定义（RSI 周期、超买超卖阈值）
+     - 支持止损功能
+   
+   - **布林带策略 (BollStrategy)**
+     - 股价穿越下轨且在中轨之下 → 买入信号
+     - 股价穿越上轨且在中轨之上 → 卖出信号
+     - 考虑带宽过滤和最小信号间隔
+     - 计算 ln(E) 指标评估交易机会
+     - 支持止损功能
+   
+   - **买入持有策略 (BuyHoldStrategy)**
+     - 作为基准对比策略
+     - 初期一次性买入并持有
+   
+   - **策略对比类 (StrategyCompare)**
+     - 支持多个策略的批量对比分析
+     - 生成对比报告和可视化图表
 
-### 4️⃣ **策略对比模块** (`compare_rsi_ma.py`)
-   - 📊 **控制台对比分析**
-     - 总收益率、年化收益率、最大回撤、夏普比率、胜率、盈亏比
-     - 统计指标：平均数、最大值、最小值、中位数、标准差
+### 4️⃣ **策略对比模块** (`StrategyCompare` 类)
+   - 📊 **多维度对比分析**
+     - 总收益率、年化收益率、最大回撤率、夏普比率
+     - 胜率、盈亏比、交易次数
+     - 超额收益、回撤改善
    
    - 📈 **可视化图表**
-     - 散点图：两个策略总收益率对比（每个点代表一只股票）
-     - 直方图：总收益率分布对比
-     - 直方图：最大回撤分布对比
+     - 散点图：两个策略收益率对比（每个点代表一只股票）
+     - 直方图：收益率分布对比
+     - 直方图：最大回撤率分布对比
      - 直方图：胜率分布对比
-   - 图表保存到 `compare_ma_rsi/` 目录
+   - 图表和报告保存到 `compare_strategies/` 目录
 
 ### 5️⃣ **主函数模块** (`run.py`)
    - 统一入口，演示各种使用场景
-   - 单只股票回测分析
-   - 多参数对比
+   - 单只股票回测分析（支持三种策略）
+   - 多参数对比（参数优化）
    - 多股票批量对比
-   - 策略对比分析
+   - 策略对比分析（多策略对比）
 
 ## 🚀 快速开始
 
 ### 环境要求
 
 ```bash
-pip install numpy pandas matplotlib baostock pathlib
+pip install numpy pandas matplotlib baostopath pathlib openpyxl tabulate chardet
 ```
+
+**依赖包说明：**
+- `numpy`：数值计算
+- `pandas`：数据处理和分析
+- `matplotlib`：图表绘制
+- `baostock`：股票数据获取
+- `openpyxl`：Excel 文件读写
+- `tabulate`：表格格式化输出
+- `chardet`：文件编码检测
 
 ### 使用流程
 
@@ -97,7 +126,7 @@ python run.py
 
 演示所有功能，包括单只股票分析、多参数对比、多股票对比等。
 
-##### 方式二：单独使用策略
+##### 方式二：单独使用双均线策略
 
 ```python
 import strategies
@@ -106,22 +135,83 @@ import strategies
 ma_strategy = strategies.DoubleMovingAverageStrategy(short_ma=10, long_ma=120)
 
 # 运行完整分析
-ma_strategy.run_complete_analysis('./data_dealed/df_pre_002385.csv', encoding='gbk')
+ma_strategy.run_complete_analysis(
+    filepath='./data_dealed/df_pre_002385.csv',
+    output_folder='./ma_results/single_stock'
+)
 
 # 打印结果并绘图
 ma_strategy.print_results()
-ma_strategy.plot_results()
+ma_strategy.plot_result()
 ```
 
-##### 方式三：策略对比分析
+##### 方式三：RSI策略
 
-```bash
-python compare_rsi_ma.py
+```python
+import strategies
+
+# 创建 RSI策略实例
+rsi_strategy = strategies.RSIStrategy(
+    initial_capital=1000000,
+    commission_rate=0.0001,
+    stamp_tax_rate=0.001,
+    min_commission=5,
+    stop_loss=0.1,  # 10% 止损
+    risk_free_rate=0.03,
+    rsi_period=14,
+    oversold_threshold=30,
+    overbought_threshold=70
+)
+
+# 运行完整分析
+result = rsi_strategy.run_complete_analysis(
+    file_path='./data_dealed/df_pre_603993.csv',
+    output_dir='./rsi_results/single_stock'
+)
 ```
 
-比较双均线策略和 RSI 策略的效果，生成详细对比报告和可视化图表。
+##### 方式四：布林带策略
 
-#### 2️⃣ 比较多组均线参数
+```python
+import strategies
+
+# 创建布林带策略实例
+boll_strategy = strategies.BollStrategy(
+    initial_capital=1000000,
+    commission_rate=0.0001,
+    stamp_duty_rate=0.001,
+    min_commission=5,
+    stop_loss_rate=0.05,
+    risk_free_rate=0.02,
+    boll_period=20,
+    boll_width=2,
+    min_bandwidth=0.02,
+    min_signal_interval=5
+)
+
+# 运行完整分析
+boll_strategy.run_complete_analysis(
+    './data_dealed/df_pre_600383.csv',
+    './boll_results/single_stock/600383'
+)
+```
+
+##### 方式五：策略对比分析
+
+```python
+import strategies
+
+# 创建策略对比分析实例
+comparator = strategies.StrategyCompare(
+    input_path='./compare_strategies/strategy_results',  # 策略结果文件夹或文件列表
+    output_dir='./compare_strategies'
+)
+
+# 运行完整分析
+results = comparator.run_full_analysis()
+```
+
+#### 2️⃣ 比较多组均线参数（双均线策略）
 
 ```python
 import strategies
@@ -130,33 +220,33 @@ import strategies
 ma_pairs = [(10, 60), (10, 120), (90, 120)]
 
 # 比较不同参数的表现
-compare_strategies_results = strategies.DoubleMovingAverageStrategy.compare_strategies(
-    './data/df_pre_002450.csv', 
-    ma_pairs, 
-    encoding='gbk'
+param_comparison_df = strategies.DoubleMovingAverageStrategy.compare_strategies(
+    filepath='./data_dealed/df_pre_002450.csv',
+    ma_pairs=ma_pairs,
+    output_folder='./ma_results/param_comparison'
 )
 
 # 打印对比摘要
-strategies.DoubleMovingAverageStrategy.print_comparison_summary(compare_strategies_results)
+strategies.DoubleMovingAverageStrategy.print_comparison_summary(param_comparison_df)
 
 # 绘制策略对比图
 strategies.DoubleMovingAverageStrategy.plot_strategies_comparison(
-    compare_strategies_results,
-    filepath='./data/df_pre_002450.csv'
+    param_comparison_df,
+    filepath='./data_dealed/df_pre_002450.csv'
 )
 ```
 
-#### 3️⃣ 多股票批量对比
+#### 3️⃣ 多股票批量对比（双均线策略）
 
 ```python
 import strategies
 
 # 比较多个股票（可以是文件夹路径或文件列表）
-compare_stocks_results = strategies.DoubleMovingAverageStrategy.compare_stocks(
-    './data_1',  # 文件夹路径或文件列表
-    short_ma=10, 
-    long_ma=120, 
-    encoding='gbk',
+comparison_df = strategies.DoubleMovingAverageStrategy.compare_stocks(
+    file_list='./data_dealed',  # 文件夹路径或文件列表
+    output_folder='./ma_results/stocks_comparison',
+    short_ma=10,
+    long_ma=120,
     initial_capital=1000000,      # 初始资金 100 万
     commission_rate=0.0001,       # 手续费率万 1
     min_commission=5,             # 最低手续费 5 元
@@ -165,16 +255,18 @@ compare_stocks_results = strategies.DoubleMovingAverageStrategy.compare_stocks(
 )
 
 # 打印对比摘要
-strategies.DoubleMovingAverageStrategy.print_comparison_summary(compare_stocks_results)
+strategies.DoubleMovingAverageStrategy.print_comparison_summary(comparison_df)
 
 # 绘制股票对比图（显示前 300 只）
 strategies.DoubleMovingAverageStrategy.plot_stock_comparison(
-    compare_stocks_results,
+    comparison_df,
     top_n=300
 )
 ```
 
 ### 自定义策略参数
+
+#### 双均线策略参数
 
 ```python
 strategy = strategies.DoubleMovingAverageStrategy(
@@ -184,7 +276,41 @@ strategy = strategies.DoubleMovingAverageStrategy(
     commission_rate=0.0001,   # 手续费率（默认万 1）
     min_commission=5,         # 最低手续费（默认 5 元）
     stamp_tax_rate=0.001,     # 印花税率（默认千 1）
+    stop_loss=0.1,            # 止损线（默认 None，如 0.1 表示-10% 止损）
     risk_free_rate=0.02       # 无风险利率（默认 2%）
+)
+```
+
+#### RSI策略参数
+
+```python
+strategy = strategies.RSIStrategy(
+    initial_capital=1000000,      # 初始资金（默认 100 万）
+    commission_rate=0.0001,       # 手续费率（默认万 1）
+    stamp_tax_rate=0.001,         # 印花税率（默认千 1）
+    min_commission=5,             # 最低手续费（默认 5 元）
+    stop_loss=0.1,                # 止损线（默认 None）
+    risk_free_rate=0.03,          # 无风险利率（默认 3%）
+    rsi_period=14,                # RSI 计算周期（默认 14 天）
+    oversold_threshold=30,        # 超卖阈值（默认 30）
+    overbought_threshold=70       # 超买阈值（默认 70）
+)
+```
+
+#### 布林带策略参数
+
+```python
+strategy = strategies.BollStrategy(
+    initial_capital=1000000,      # 初始资金（默认 100 万）
+    commission_rate=0.0001,       # 手续费率（默认万 1）
+    stamp_duty_rate=0.001,        # 印花税率（默认千 1）
+    min_commission=5,             # 最低手续费（默认 5 元）
+    stop_loss_rate=0.05,          # 止损率（默认 5%）
+    risk_free_rate=0.02,          # 无风险利率（默认 2%）
+    boll_period=20,               # 布林带计算周期（默认 20 天）
+    boll_width=2,                 # 布林带宽度（默认 2 倍标准差）
+    min_bandwidth=0.02,           # 最小带宽（默认 2%）
+    min_signal_interval=5         # 最小信号间隔天数（默认 5 天）
 )
 ```
 
@@ -212,50 +338,104 @@ strategy = strategies.DoubleMovingAverageStrategy(
 - `收盘`：收盘价
 - `成交量`：成交量
 - `成交额`：成交额
+- `异常情况`：标注停牌、价格异常等特殊情况（如有）
 
 ### 对比结果文件
 
-- `ma_compare_stocks.csv`：双均线策略多股票分析结果
-- `rsi_compare_stocks.csv`：RSI 策略多股票分析结果
-- 包含指标：股票代码、总收益率、年化收益率、最大回撤、夏普比率、胜率、盈亏比等
+- `ma_results/`：双均线策略分析结果（Excel 报告 + 图表）
+- `rsi_results/`：RSI策略分析结果（Excel 报告 + 图表）
+- `boll_results/`：布林带策略分析结果（Excel 报告 + 图表）
+- `compare_strategies/`：多策略对比分析报告和图表
+- 包含指标：股票代码、策略总收益率、年化收益率、最大回撤率、夏普比率、胜率、盈亏比等
 
-## 📈 策略对比示例
+## 💡 使用场景示例
 
-### 运行对比分析
+### 场景 1：单只股票深度分析
 
-```bash
-python compare_rsi_ma.py
+``python
+import strategies
+
+# 创建双均线策略实例
+ma_strategy = strategies.DoubleMovingAverageStrategy(short_ma=10, long_ma=120)
+
+# 运行完整分析（生成 Excel 报告 + 图表）
+ma_strategy.run_complete_analysis(
+    filepath='./data_dealed/df_pre_600519.csv',
+    output_folder='./ma_results/single_stock'
+)
 ```
 
-### 输出结果
+**输出：**
+- Excel 报告：包含参数说明、绩效指标、日度数据、交易记录
+- PNG 图表：价格走势、持仓状态、净值曲线、回撤曲线
 
-#### 1. 控制台统计对比
+### 场景 2：参数优化测试
 
+``python
+import strategies
+
+# 定义要测试的均线参数组合
+ma_combinations = [
+    (5, 20),    # 短期趋势
+    (10, 60),   # 中期趋势
+    (10, 120),  # 中长期趋势
+    (20, 250)   # 长期趋势
+]
+
+# 比较不同参数的表现
+param_comparison_df = strategies.DoubleMovingAverageStrategy.compare_strategies(
+    filepath='./data_dealed/df_pre_600519.csv',
+    ma_pairs=ma_combinations,
+    output_folder='./ma_results/param_optimization'
+)
+
+# 查看最优参数
+print(param_comparison_df.sort_values('总收益率', ascending=False))
 ```
-================================================================================
-双均线策略 vs RSI 策略对比分析
-================================================================================
 
-总收益率:
-统计指标             双均线策略          RSI 策略              差异
-------------------------------------------------------------
-平均数                 0.124625        0.462332       -0.337706
-最大值                 5.548966        8.900976       -3.352010
-最小值                -1.548686       -0.987952       -0.560734
-中位数                -0.173916        0.251428       -0.425344
-标准差                 0.944691        1.038187       -0.093496
+### 场景 3：多股票批量回测
 
-最大回撤:
-统计指标             双均线策略          RSI 策略              差异
-------------------------------------------------------------
-平均数                 0.599978        0.534210        0.065768
-...
+``python
+import strategies
+
+# 批量测试沪深 300 成分股
+results = strategies.DoubleMovingAverageStrategy.compare_stocks(
+    file_list='./data_dealed',
+    output_folder='./ma_results/batch',
+    short_ma=10,
+    long_ma=120,
+    initial_capital=1000000
+)
+
+# 筛选表现最好的前 10 只股票
+top_stocks = results.sort_values('总收益率', ascending=False).head(10)
+print(top_stocks[['股票代码', '总收益率', '夏普比率', '最大回撤率']])
 ```
 
-#### 2. 可视化图表
+### 场景 4：多策略对比
 
-- `compare_ma_rsi/strategy_comparison_scatter.png`：总收益率散点图
-- `compare_ma_rsi/strategy_comparison_histograms.png`：三个指标的直方图对比
+``python
+import strategies
+
+# 准备各策略的回测结果文件夹
+# 1. 运行双均线策略，结果保存到 ./strategy_results/ma_*
+# 2. 运行 RSI策略，结果保存到 ./strategy_results/rsi_*
+# 3. 运行布林带策略，结果保存到 ./strategy_results/boll_*
+
+# 创建策略对比分析实例
+comparator = strategies.StrategyCompare(
+    input_path='./strategy_results',
+    output_dir='./compare_strategies'
+)
+
+# 运行完整对比分析
+results = comparator.run_full_analysis()
+
+# 输出包括：
+# - Excel 对比报告
+# - 散点图（两两策略对比）
+# - 直方图（收益率、回撤、胜率分布）
+```
 
 ## 🔧 策略逻辑详解
 
@@ -272,8 +452,10 @@ python compare_rsi_ma.py
 - 买入份额为 100 的整数倍（整手交易）
 - 手续费 = max(交易金额 × 费率，最低手续费)
 - 印花税 = 交易金额 × 税率（仅卖出时收取）
+- 最小信号间隔：相同方向信号之间至少间隔 5 天
+- 首笔交易必须是买入
 
-### RSI 策略
+### RSI策略
 
 RSI（相对强弱指数）策略基于动量理论，衡量价格的涨跌动能。
 
@@ -284,40 +466,69 @@ RS = N 日内上涨幅度平均值 / N 日内下跌幅度平均值
 ```
 
 **交易规则：**
-1. **超卖区域（买入信号）**：RSI < 超卖阈值（如 20）
+1. **超卖区域（买入信号）**：RSI < 超卖阈值（如 30）
    - 表明市场可能过度下跌，存在反弹机会
    
-2. **超买区域（卖出信号）**：RSI > 超买阈值（如 80）
+2. **超买区域（卖出信号）**：RSI > 超买阈值（如 70）
    - 表明市场可能过度上涨，存在回调风险
 
 **参数说明：**
 - `rsi_period`：RSI 计算周期（默认 14 天）
-- `oversold_threshold`：超卖阈值（默认 20）
-- `overbought_threshold`：超买阈值（默认 80）
+- `oversold_threshold`：超卖阈值（默认 30）
+- `overbought_threshold`：超买阈值（默认 70）
+
+### 布林带策略
+
+布林带策略基于统计学原理，利用移动平均线和标准差构建价格通道。
+
+**计算公式：**
+```
+中轨 = N 日收盘价的移动平均线
+上轨 = 中轨 + K × 标准差
+下轨 = 中轨 - K × 标准差
+带宽 = (上轨 - 下轨) / 中轨
+```
+
+**交易规则：**
+1. **买入信号**（同时满足以下条件）：
+   - 昨日收盘价 < 昨日下轨（突破下轨）
+   - 今日收盘价 ≥ 今日下轨（回升到下轨之上）
+   - 今日收盘价 < 今日中轨（在中轨之下）
+   - 带宽 ≥ 最小带宽阈值（避免窄幅震荡）
+
+2. **卖出信号**（同时满足以下条件）：
+   - 昨日收盘价 > 昨日上轨（突破上轨）
+   - 今日收盘价 ≤ 今日上轨（回落到上轨之下）
+   - 今日收盘价 > 今日中轨（在中轨之上）
+
+**辅助指标：**
+- **ln(E) 指标**：评估买入机会的质量
+  - A = (未来 10 日最高价 - 买入价) / 买入价
+  - B = (买入价 - 未来 10 日最低价) / 买入价
+  - ln(E) = ln(A/B)，取值范围 [-10, 10]
+  - 值越大表示上涨空间相对于下跌风险越大
+
+**参数说明：**
+- `boll_period`：布林带计算周期（默认 20 天）
+- `boll_width`：布林带宽度倍数（默认 2 倍标准差）
+- `min_bandwidth`：最小带宽阈值（默认 2%）
+- `min_signal_interval`：最小信号间隔天数（默认 5 天）
 
 ## 📝 注意事项
 
 1. **数据质量**：确保数据完整且准确，缺少关键字段会导致错误
 2. **参数设置**：
    - 双均线：短期均线周期应小于长期均线周期
-   - RSI 策略：合理设置超买超卖阈值
+   - RSI策略：合理设置超买超卖阈值（一般超卖 20-30，超买 70-80）
+   - 布林带策略：带宽阈值不宜过小，避免频繁交易
 3. **回测局限性**：历史表现不代表未来收益
 4. **交易成本**：已考虑手续费和印花税，但未考虑滑点
 5. **流动性假设**：假设可以按收盘价成交
 6. **数据更新**：定期运行 `getdata_hs300.py` 更新最新数据
-7. **回撤率处理**：RSI 策略的回撤率已自动转换为绝对值便于对比
-
-## 🛠️ 扩展开发
-
-### 添加新策略
-
-继承 `DoubleMovingAverageStrategy` 类或创建新策略类，实现以下方法：
-- `load_data()`：加载数据
-- `preprocess_data()`：数据预处理
-- `generate_signals()`：生成交易信号
-- `run_backtest()`：运行回测
-- `calculate_metrics()`：计算绩效指标
-- `plot_results()`：绘制结果图表
+7. **回撤率处理**：所有策略的回撤率已自动转换为绝对值便于对比
+8. **信号间隔**：相同方向信号之间设有最小间隔（默认 5 天），避免频繁交易
+9. **异常情况处理**：支持停牌、价格异常等特殊情况的信号延迟执行
+10. **整手交易**：买入份额为 100 的整数倍，符合 A 股交易规则
 
 ## 🛠️ 扩展开发
 
@@ -329,9 +540,13 @@ RS = N 日内上涨幅度平均值 / N 日内下跌幅度平均值
 - `generate_signals()`：生成交易信号
 - `run_backtest()`：运行回测
 - `calculate_metrics()`：计算绩效指标
-- `plot_results()`：绘制结果图表
+- `plot_result()`：绘制结果图表
+- `write_report()`：编写 Excel 报告
+- `run_complete_analysis()`：运行完整分析流程
 
 ### 批量处理示例
+
+#### 双均线策略批量处理
 
 ```python
 from pathlib import Path
@@ -342,21 +557,80 @@ file_list = list(Path('./data_dealed').glob("*.csv"))
 
 # 批量分析（双均线策略）
 ma_results = strategies.DoubleMovingAverageStrategy.compare_stocks(
-    file_list, 
-    short_ma=10, 
+    file_list=file_list,
+    output_folder='./ma_results/batch',
+    short_ma=10,
     long_ma=120
 )
+```
 
-# 批量分析（RSI 策略）
+#### RSI策略批量处理
+
+```python
+import strategies
+
+# 批量分析（RSI策略）
 rsi_results = strategies.RSIStrategy.compare_stocks(
-    file_list,
+    input_source='./data_dealed',
+    output_dir='./rsi_results/batch',
     rsi_period=14,
-    oversold_threshold=20,
-    overbought_threshold=80
+    oversold_threshold=30,
+    overbought_threshold=70
+)
+```
+
+#### 布林带策略批量处理
+
+```python
+import strategies
+
+# 定义策略参数
+params = {
+    'initial_capital': 1000000,
+    'commission_rate': 0.0001,
+    'stamp_duty_rate': 0.001,
+    'min_commission': 5,
+    'stop_loss_rate': 0.05,
+    'risk_free_rate': 0.02,
+    'boll_period': 20,
+    'boll_width': 2
+}
+
+# 批量分析（布林带策略）
+boll_results = strategies.BollStrategy.compare_stocks(
+    './data_dealed',
+    params,
+    './boll_results/batch'
+)
+```
+
+#### 多策略对比
+
+```python
+import strategies
+
+# 创建策略对比分析实例
+comparator = strategies.StrategyCompare(
+    input_path='./strategy_results',  # 策略结果文件夹
+    output_dir='./compare_strategies'
 )
 
-# 导出结果
+# 运行完整分析（生成 Excel 报告 + 散点图 + 直方图）
+results = comparator.run_full_analysis()
+
+# 单独生成两个策略的散点图
+comparator.plot_scatter('双均线', 'RSI')
+comparator.plot_scatter('双均线', '布林带')
+comparator.plot_scatter('RSI', '布林带')
+```
+
+### 导出结果
+
+```
+# 导出双均线策略结果
 ma_results.to_csv('ma_compare_stocks.csv', index=False)
+
+# 导出 RSI策略结果
 rsi_results.to_csv('rsi_compare_stocks.csv', index=False)
 ```
 

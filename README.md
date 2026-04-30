@@ -1,13 +1,14 @@
 # 量化交易策略回测系统
 
-基于 Python 的股票量化交易策略回测系统，实现了**双均线策略**、**RSI策略**和**布林带策略**的完整回测框架，支持多股票对比分析、参数优化和策略效果比较。
+基于 Python 的股票量化交易策略回测系统，实现了**双均线策略**、**RSI策略**、**布林带策略**和**MACD策略**的完整回测框架，支持多股票对比分析、参数优化、风险管理和策略效果比较。
 
 ## 📁 项目结构
 
 ```
 quant/
 ├── run.py                      # 主程序入口，演示各种使用场景
-├── strategies.py               # 核心策略实现（双均线策略 + RSI策略 + 布林带策略）
+├── strategies.py               # 核心策略实现（双均线策略 + RSI策略 + 布林带策略 + MACD策略）
+├── tools.py                    # 工具类（技术指标计算、风险管理器、Backtrader组件等）
 ├── getdata_hs300.py           # 获取沪深 300 成分股日交易数据
 ├── dealdata.py                # 数据清洗脚本
 ├── data/                      # 原始股票数据存储目录
@@ -15,6 +16,7 @@ quant/
 ├── ma_results/                # 双均线策略结果输出目录
 ├── rsi_results/               # RSI策略结果输出目录
 ├── boll_results/              # 布林带策略结果输出目录
+├── macd_results/              # MACD策略结果输出目录
 ├── compare_strategies/        # 多策略对比图表输出目录
 └── 分析报告/                  # 生成的回测报告目录
 ```
@@ -39,12 +41,14 @@ quant/
      - 短期均线下穿长期均线 → 卖出信号（死叉）
      - 考虑涨跌停限制、交易延迟、整手交易
      - 支持止损功能
+     - **新增**: 支持风险管理器（动态仓位管理、分批建仓加仓）
    
    - **RSI策略 (RSIStrategy)**
      - RSI < 超卖阈值 → 买入信号
      - RSI > 超买阈值 → 卖出信号
      - 支持参数自定义（RSI 周期、超买超卖阈值）
      - 支持止损功能
+     - **新增**: 支持风险管理器
    
    - **布林带策略 (BollStrategy)**
      - 股价穿越下轨且在中轨之下 → 买入信号
@@ -52,6 +56,16 @@ quant/
      - 考虑带宽过滤和最小信号间隔
      - 计算 ln(E) 指标评估交易机会
      - 支持止损功能
+     - **新增**: 基于 Backtrader 框架实现，支持完整的风险管理
+   
+   - **MACD策略 (MACDStrategy)** ⭐ 新增
+     - DIF上穿DEA且在0轴以上 → 买入信号（金叉）
+     - DIF下穿DEA → 卖出信号（死叉）
+     - 基于 EMA12、EMA26、DEA9 标准参数
+     - 计算 ATR 指标用于风险管理
+     - 计算 ln(E) 指标评估信号质量
+     - 支持动态仓位管理和分批加仓
+     - 支持风险管理器
    
    - **买入持有策略 (BuyHoldStrategy)**
      - 作为基准对比策略
@@ -61,7 +75,33 @@ quant/
      - 支持多个策略的批量对比分析
      - 生成对比报告和可视化图表
 
-### 4️⃣ **策略对比模块** (`StrategyCompare` 类)
+### 4️⃣ **工具模块** (`tools.py`) ⭐ 新增
+   - **技术指标工具类 (TechnicalIndicators)**
+     - ATR 计算（排除停牌日）
+     - MACD 计算（DIF、DEA、快慢EMA）
+     - RSI 计算（排除停牌日）
+     - 布林带计算（排除停牌日）
+     - 移动平均线计算（排除停牌日）
+     - 金叉死叉检测
+     - 信号过滤（首笔买入、买卖交替、最小间隔）
+     - ln(E) 指标计算
+   
+   - **风险管理器 (RiskManage)** ⭐ 核心新增
+     - 动态仓位管理：基于ATR和风险预算计算仓位
+     - 分批建仓加仓：支持自定义加仓比例分配
+     - 动态止损止盈：基于ATR倍数设置止损止盈线
+     - 追踪止盈：最高价回撤触发止盈
+     - 加仓条件判断：价格突破加仓阈值
+   
+   - **Backtrader 组件**
+     - MyCommInfo: 自定义佣金计算（百分比+最低佣金）
+     - MyRMSizer: 风险管理仓位管理器
+     - MyAllInSizer: 全仓买入仓位管理器
+     - MyBroker: 支持印花税的经纪商
+     - SignalEffectiveness: 信号有效性分析器
+     - MyObserver: 自定义观察器
+
+### 5️⃣ **策略对比模块** (`StrategyCompare` 类)
    - 📊 **多维度对比分析**
      - 总收益率、年化收益率、最大回撤率、夏普比率
      - 胜率、盈亏比、交易次数
@@ -86,7 +126,7 @@ quant/
 ### 环境要求
 
 ```bash
-pip install numpy pandas matplotlib baostopath pathlib openpyxl tabulate chardet
+pip install numpy pandas matplotlib baostock pathlib openpyxl tabulate chardet talib backtrader
 ```
 
 **依赖包说明：**
@@ -97,6 +137,8 @@ pip install numpy pandas matplotlib baostopath pathlib openpyxl tabulate chardet
 - `openpyxl`：Excel 文件读写
 - `tabulate`：表格格式化输出
 - `chardet`：文件编码检测
+- `talib`：技术指标计算库
+- `backtrader`：量化回测框架
 
 ### 使用流程
 
@@ -196,7 +238,40 @@ boll_strategy.run_complete_analysis(
 )
 ```
 
-##### 方式五：策略对比分析
+##### 方式五：MACD策略 ⭐ 新增
+
+```python
+import strategies
+from tools import RiskManage
+
+# 创建风险管理器实例
+risk_manager = RiskManage(
+    risk_percent=0.02,           # 风险预算 2%
+    add_ratios=[0.4, 0.3, 0.3],  # 建仓40%，加仓30%、30%
+    add_atr_multiple=1.0,        # 加仓间隔 1倍ATR
+    stop_atr_multiple=2.0        # 止损止盈 2倍ATR
+)
+
+# 创建 MACD策略实例
+macd_strategy = strategies.MACDStrategy(
+    initial_capital=1000000,
+    commission_rate=0.0001,
+    stamp_tax_rate=0.001,
+    min_commission=5,
+    risk_free_rate=0.03,
+    macd_params=[12, 26, 9],     # MACD参数: fast, slow, signal
+    atr_period=14                # ATR周期
+)
+
+# 运行完整分析（启用风险管理）
+macd_strategy.run_complete_analysis(
+    './data_dealed/df_pre_600519.csv',
+    './macd_results/single_stock',
+    risk_manager=risk_manager
+)
+```
+
+##### 方式六：策略对比分析
 
 ```python
 import strategies
@@ -544,6 +619,25 @@ RS = N 日内上涨幅度平均值 / N 日内下跌幅度平均值
 - `write_report()`：编写 Excel 报告
 - `run_complete_analysis()`：运行完整分析流程
 
+**风险管理器集成** ⭐ 新增
+
+如果需要使用风险管理器，可以在回测时传入 `risk_manager` 参数：
+
+```python
+from tools import RiskManage
+
+# 创建风险管理器
+risk_manager = RiskManage(
+    risk_percent=0.02,
+    add_ratios=[0.4, 0.3, 0.3],
+    add_atr_multiple=1.0,
+    stop_atr_multiple=2.0
+)
+
+# 在回测时使用
+strategy.run_backtest(risk_manager=risk_manager)
+```
+
 ### 批量处理示例
 
 #### 双均线策略批量处理
@@ -601,6 +695,29 @@ boll_results = strategies.BollStrategy.compare_stocks(
     './data_dealed',
     params,
     './boll_results/batch'
+)
+```
+
+#### MACD策略批量处理 ⭐ 新增
+
+```python
+import strategies
+from tools import RiskManage
+
+# 创建风险管理器
+risk_manager = RiskManage(
+    risk_percent=0.02,
+    add_ratios=[0.4, 0.3, 0.3],
+    add_atr_multiple=1.0,
+    stop_atr_multiple=2.0
+)
+
+# 批量分析（MACD策略）
+strategies.MACDStrategy.compare_stocks(
+    files_or_folder='./data_dealed',
+    output_folder='./macd_results/batch',
+    save_detail=True,  # 是否保存每只股票的详细报告
+    risk_manager=risk_manager
 )
 ```
 
